@@ -145,12 +145,36 @@ For a CI job doing 15 exports on one board:
 - Not a network daemon — Unix socket only.
 - Not a multi-user daemon — per-`$USER` socket.
 
-## Next patch
+## Status — MVP landed as patches 0007-0013
 
-`patches/0007-command_daemon-scaffolding.patch` — adds the empty
-`DAEMON_START_COMMAND` / `DAEMON_STOP_COMMAND` / `DAEMON_STATUS_COMMAND`
-subcommand entries, so the argparse tree accepts `kicad-cli daemon
-{start,stop,status}` and prints a "not yet implemented" message. Lands
-the CMake + subcommand registration plumbing without any behavior
-change. Subsequent patches fill in the socket, framing, dispatcher, and
-cache.
+| patch  | what landed                                                                                     |
+|--------|-------------------------------------------------------------------------------------------------|
+| 0007   | scaffold `kicad-cli daemon {start,stop,status}` subcommand tree + CMake entry                   |
+| 0008   | `daemon start` real socket bind/listen/accept loop, SIGINT/SIGTERM clean shutdown               |
+| 0009   | request/response wire protocol (KCLI/STAT magic + argc/args/cwd/exit/out/err)                   |
+| 0010   | dispatch integration — extract `OnPgmRun` body into `CLI::RunKicadCliDispatch()`, daemon calls it with per-client cwd chdir + stdio fd redirect |
+| 0011   | pidfile-based `daemon stop` (SIGTERM + poll) and `daemon status` (RUNNING/STALE/NOT RUNNING with socket probe) |
+| 0012   | widen `m_cliBoard` scalar cache to a 4-slot (path,mtime,forExport)-keyed LRU deque              |
+| 0013   | client-side `--via-daemon` / `KICAD_CLI_DAEMON=1` auto-connect in `PGM_KICAD::OnPgmRun`         |
+
+Wire protocol was validated end-to-end with a standalone C server
+(`scratch/wire_protocol_test_server.c`) + Python client
+(`scratch/kicad_cli_daemon_client.py`) before the real dispatch landed
+— argv[0..6] and cwd round-trip cleanly, response deserialization
+returns the expected exit code and captured stdout.
+
+## Still open
+
+- Runtime end-to-end validation against a real built kicad-cli — waiting
+  on a working full-tree build (see `benchmarks/00-baseline-…` for the
+  dep-chase blocker).
+- `LOCALE_IO` and `wxLog` sinks are process-global; second dispatch of
+  a command that stashed state may leak into the next request. Needs a
+  scope-guard sweep in `RunKicadCliDispatch()`.
+- `SETTINGS_MANAGER::LoadProject()` idempotency — currently the CLI
+  path loads a project per request; the daemon should reuse an
+  already-loaded PROJECT* when the same path comes back.
+- Concurrent requests: MVP is single-in-flight. Follow-up: per-command
+  mutex or worker-subprocess fanout.
+- `daemon start --detach` so users can shell start without needing to
+  background it themselves.
