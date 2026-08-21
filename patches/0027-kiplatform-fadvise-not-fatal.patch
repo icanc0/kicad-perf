@@ -1,0 +1,55 @@
+From 4185371c8a582e369dced049467db766400c4615 Mon Sep 17 00:00:00 2001
+From: icanc0 <ai7@vincentxie.net>
+Date: Fri, 21 Aug 2026 23:33:31 +0000
+Subject: [PATCH] =?UTF-8?q?P27:=20KIPLATFORM::IO::SeqFOpen=20=E2=80=94=20t?=
+ =?UTF-8?q?reat=20posix=5Ffadvise=20failure=20as=20harmless?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The old code closed the file and returned nullptr if posix_fadvise
+failed. posix_fadvise is advisory — its failure never invalidates the
+FILE*. Consequence: on filesystems where fadvise isn't supported
+(some FUSE mounts, network filesystems, in-VM overlays) SeqFOpen
+returned NULL for a perfectly openable file, and every FILE_LINE_READER
+consumer threw 'Unable to open %s for reading' — an error message with
+no relation to the actual cause. Board load, footprint load, drawing
+sheet load, DRC rules load, netlist load all break for the same
+reason on affected filesystems.
+
+Ignore fadvise failure. If the OS can't optimise read-ahead, it just
+uses the default heuristic — the FILE* is still fine.
+---
+ libs/kiplatform/os/unix/io.cpp | 16 +++++++++++-----
+ 1 file changed, 11 insertions(+), 5 deletions(-)
+
+diff --git a/libs/kiplatform/os/unix/io.cpp b/libs/kiplatform/os/unix/io.cpp
+index 6018bb92..58b1bff3 100644
+--- a/libs/kiplatform/os/unix/io.cpp
++++ b/libs/kiplatform/os/unix/io.cpp
+@@ -42,11 +42,17 @@ FILE* KIPLATFORM::IO::SeqFOpen( const wxString& aPath, const wxString& aMode )
+ 
+     if( fp )
+     {
+-        if( posix_fadvise( fileno( fp ), 0, 0, POSIX_FADV_SEQUENTIAL ) != 0 )
+-        {
+-            fclose( fp );
+-            fp = nullptr;
+-        }
++        // posix_fadvise is a hint for the kernel's read-ahead heuristic. On
++        // some filesystems (older kernels + FUSE, some in-VM overlays, and
++        // certain network mounts) it returns EINVAL / EBADF / EOPNOTSUPP
++        // even though the FILE* is perfectly usable. The old code closed
++        // the file on that error, then FILE_LINE_READER's ctor threw
++        // "Unable to open %s for reading" — a totally misleading error
++        // that made board load fail on those filesystems.
++        //
++        // Fadvise is advisory; on failure the OS just uses its default
++        // read-ahead policy. Never destroy the fp because of it.
++        (void) posix_fadvise( fileno( fp ), 0, 0, POSIX_FADV_SEQUENTIAL );
+     }
+ 
+     return fp;
+-- 
+2.39.5
+
