@@ -1,0 +1,50 @@
+From d7dfc7106938cb7de45239d8f2c1faa64a25c4ce Mon Sep 17 00:00:00 2001
+From: icanc0 <ai7@vincentxie.net>
+Date: Fri, 21 Aug 2026 20:08:39 +0000
+Subject: [PATCH] P16: KICAD_CLI_FULL_INIT env-var escape hatch for patch 0003
+
+Setting KICAD_CLI_FULL_INIT=1 in the environment forces getBoardForExport
+to route back through the standard full-init getBoard(). This lets a
+user hit the safe-but-slow path when they know their .kicad_pcb has
+stale zone net_codes that only get canonicalised by BuildListOfNets ->
+SetAreasNetCodesFromNetNames.
+
+Docs: analysis/01-board-load-init.md 'Known caveat' section.
+---
+ pcbnew/pcbnew_jobs_handler.cpp | 13 +++++++++++++
+ 1 file changed, 13 insertions(+)
+
+diff --git a/pcbnew/pcbnew_jobs_handler.cpp b/pcbnew/pcbnew_jobs_handler.cpp
+index 9120ac29..297b35ad 100644
+--- a/pcbnew/pcbnew_jobs_handler.cpp
++++ b/pcbnew/pcbnew_jobs_handler.cpp
+@@ -18,6 +18,7 @@
+  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+  */
+ 
++#include <cstdlib>
+ #include <richio.h>
+ #include <wx/crt.h>
+ #include <wx/dir.h>
+@@ -672,6 +673,18 @@ BOARD* PCBNEW_JOBS_HANDLER::getBoardForExport( const wxString& aPath )
+     // the board (SVG/PDF/PNG/DXF/PS/Gerber/Drill/GenCad/…). Skip the
+     // connectivity graph, DRC engine, component-class sync, and tuning
+     // profile sync — none of which the plotter or exporters consult.
++    //
++    // Escape hatch: KICAD_CLI_FULL_INIT=1 in the environment routes back
++    // through the standard full-init getBoard(). Useful for the rare case
++    // where a legacy or hand-crafted .kicad_pcb has stale zone net_codes
++    // that only get canonicalised by BuildListOfNets ->
++    // SetAreasNetCodesFromNetNames. See analysis/01-board-load-init.md
++    // in the kicad-perf repo.
++    if( const char* env = std::getenv( "KICAD_CLI_FULL_INIT" );
++        env && env[0] && env[0] != '0' )
++    {
++        return getBoard( aPath );
++    }
+ 
+     SETTINGS_MANAGER& settingsManager = Pgm().GetSettingsManager();
+     wxString loadError;
+-- 
+2.39.5
+
