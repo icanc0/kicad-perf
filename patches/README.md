@@ -11,8 +11,8 @@ Each patch is a `git format-patch` output — `git am` or `git apply` clean.
 | 4 | `0004-kicad_cli-lazy-argparse-subtree.patch`                                     | scan argv for the top-level cmd; only build that subtree of argparse. Full tree still built for --help / unknown-cmd | ~5-20 ms per invocation    | low     |
 | 5 | `0005-pgm_base-skip-curl-sentry-in-headless.patch`                               | gate `KICAD_CURL::Init()`, `SENTRY::Init()`, and Sentry `AddTag` on `!aHeadless`                             | ~10-50 ms per CLI invocation | low     |
 | 6 | `0006-singleton-lazy-thread-pool.patch`                                          | `KICAD_SINGLETON` stops eagerly spawning N worker threads; `std::call_once`-guarded `EnsureThreadPool()` runs on first task submission | **avoid 8 clone()+join() per invocation**, esp. for `--version` / `--help` / small exports | low-medium — must never take a raw pointer to the pool before first submit |
-
-## Expected combined win (theoretical, not yet measured)
+| 7 | `0007-cli-daemon-scaffold.patch`                                                | new `kicad-cli daemon {start,stop,status}` verb + subcommands (all currently stub-print "not yet implemented"). Argparse plumbing + CMake entry only, so follow-up patches for the socket/dispatcher/cache have somewhere to land. | 0 today; unlocks 10-60× via daemon | trivial |
+ (theoretical, not yet measured)
 
 Applying 0001-0006 to `kicad-cli --version` on the aarch64 baseline (254 ms):
 

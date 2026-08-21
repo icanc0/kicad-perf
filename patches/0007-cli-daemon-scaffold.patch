@@ -1,0 +1,276 @@
+From ae9c9b52690580a6a7e0843bee58029cb806b6c5 Mon Sep 17 00:00:00 2001
+From: icanc0 <ai7@vincentxie.net>
+Date: Fri, 21 Aug 2026 17:30:14 +0000
+Subject: [PATCH] P7: scaffold kicad-cli daemon subcommand (start/stop/status)
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+New kicad/cli/command_daemon.{h,cpp} adds `kicad-cli daemon` with
+start/stop/status children. All three currently print 'not yet
+implemented' and exit non-zero — this patch lands only the argparse
+plumbing and CMakeLists.txt entry, so subsequent patches can fill in
+the Unix-socket server, request framing, dispatcher, and BOARD cache
+without also having to touch the top-level kicad_cli.cpp.
+
+See analysis/02-daemon-mode-design.md in the kicad-perf repo for the
+full plan (~500 LOC across ~6 files). Expected impact: 10-60× speedup
+on CI-shaped workflows that call kicad-cli many times against the same
+board.
+---
+ kicad/CMakeLists.txt         |   1 +
+ kicad/cli/command_daemon.cpp | 105 +++++++++++++++++++++++++++++++++++
+ kicad/cli/command_daemon.h   |  78 ++++++++++++++++++++++++++
+ kicad/kicad_cli.cpp          |  13 +++++
+ 4 files changed, 197 insertions(+)
+ create mode 100644 kicad/cli/command_daemon.cpp
+ create mode 100644 kicad/cli/command_daemon.h
+
+diff --git a/kicad/CMakeLists.txt b/kicad/CMakeLists.txt
+index 68fdbbb8..626657d1 100644
+--- a/kicad/CMakeLists.txt
++++ b/kicad/CMakeLists.txt
+@@ -101,6 +101,7 @@ set( KICAD_CLI_SRCS
+     cli/command_gerber_convert_png.cpp
+     cli/command_gerber_diff.cpp
+     cli/command_version.cpp
++    cli/command_daemon.cpp
+ 
+     jobs_runner.cpp
+     )
+diff --git a/kicad/cli/command_daemon.cpp b/kicad/cli/command_daemon.cpp
+new file mode 100644
+index 00000000..647396d7
+--- /dev/null
++++ b/kicad/cli/command_daemon.cpp
+@@ -0,0 +1,105 @@
++/*
++ * This program source code file is part of KiCad, a free EDA CAD application.
++ *
++ * Copyright The KiCad Developers, see AUTHORS.txt for contributors.
++ *
++ * This program is free software: you can redistribute it and/or modify it
++ * under the terms of the GNU General Public License as published by the
++ * Free Software Foundation, either version 3 of the License, or (at your
++ * option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful, but
++ * WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
++ */
++
++#include "command_daemon.h"
++#include <cli/exit_codes.h>
++#include <wx/crt.h>
++
++// This file is the scaffolding for `kicad-cli daemon {start,stop,status}`.
++// See analysis/02-daemon-mode-design.md for the plan. Subsequent patches
++// wire in the actual Unix-socket server, client stub, dispatcher, and
++// per-path BOARD cache.
++
++
++#define ARG_SOCKET "--socket"
++
++
++CLI::DAEMON_COMMAND::DAEMON_COMMAND() : COMMAND( "daemon" )
++{
++    m_argParser.add_description(
++            UTF8STDSTR( _( "Manage a long-lived kicad-cli server (start / stop / status)" ) ) );
++}
++
++
++int CLI::DAEMON_COMMAND::doPerform( KIWAY& )
++{
++    // Parent verb: print usage rather than error, matches other top-level
++    // command groups like `pcb` and `sch`.
++    PrintHelp();
++    return EXIT_CODES::OK;
++}
++
++
++CLI::DAEMON_START_COMMAND::DAEMON_START_COMMAND() : COMMAND( "start" )
++{
++    m_argParser.add_description( UTF8STDSTR( _( "Start the kicad-cli daemon in the foreground" ) ) );
++
++    m_argParser.add_argument( ARG_SOCKET )
++            .default_value( std::string() )
++            .help( UTF8STDSTR(
++                    _( "Unix socket path (default: $XDG_RUNTIME_DIR/kicad-cli.sock)" ) ) )
++            .metavar( "PATH" );
++}
++
++
++int CLI::DAEMON_START_COMMAND::doPerform( KIWAY& )
++{
++    wxFprintf( stderr,
++               _( "daemon start: not yet implemented (scaffold only).\n"
++                  "See analysis/02-daemon-mode-design.md for the plan.\n" ) );
++    return EXIT_CODES::ERR_UNKNOWN;
++}
++
++
++CLI::DAEMON_STOP_COMMAND::DAEMON_STOP_COMMAND() : COMMAND( "stop" )
++{
++    m_argParser.add_description(
++            UTF8STDSTR( _( "Signal a running kicad-cli daemon to exit cleanly" ) ) );
++
++    m_argParser.add_argument( ARG_SOCKET )
++            .default_value( std::string() )
++            .help( UTF8STDSTR( _( "Unix socket path" ) ) )
++            .metavar( "PATH" );
++}
++
++
++int CLI::DAEMON_STOP_COMMAND::doPerform( KIWAY& )
++{
++    wxFprintf( stderr, _( "daemon stop: not yet implemented (scaffold only).\n" ) );
++    return EXIT_CODES::ERR_UNKNOWN;
++}
++
++
++CLI::DAEMON_STATUS_COMMAND::DAEMON_STATUS_COMMAND() : COMMAND( "status" )
++{
++    m_argParser.add_description(
++            UTF8STDSTR( _( "Print daemon liveness and cache statistics" ) ) );
++
++    m_argParser.add_argument( ARG_SOCKET )
++            .default_value( std::string() )
++            .help( UTF8STDSTR( _( "Unix socket path" ) ) )
++            .metavar( "PATH" );
++}
++
++
++int CLI::DAEMON_STATUS_COMMAND::doPerform( KIWAY& )
++{
++    wxFprintf( stderr, _( "daemon status: not yet implemented (scaffold only).\n" ) );
++    return EXIT_CODES::ERR_UNKNOWN;
++}
+diff --git a/kicad/cli/command_daemon.h b/kicad/cli/command_daemon.h
+new file mode 100644
+index 00000000..dd2b08ef
+--- /dev/null
++++ b/kicad/cli/command_daemon.h
+@@ -0,0 +1,78 @@
++/*
++ * This program source code file is part of KiCad, a free EDA CAD application.
++ *
++ * Copyright The KiCad Developers, see AUTHORS.txt for contributors.
++ *
++ * This program is free software: you can redistribute it and/or modify it
++ * under the terms of the GNU General Public License as published by the
++ * Free Software Foundation, either version 3 of the License, or (at your
++ * option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful, but
++ * WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
++ */
++
++#ifndef COMMAND_DAEMON_H
++#define COMMAND_DAEMON_H
++
++#include "command.h"
++
++namespace CLI
++{
++/**
++ * `kicad-cli daemon` — parent noun for the long-lived kicad-cli server.
++ *
++ * The daemon collapses the ~700-900 ms fixed startup cost of every
++ * `kicad-cli` invocation to a one-time cost, and reuses a per-path
++ * BOARD cache across requests. Designed for CI-shaped workflows that
++ * call kicad-cli many times against the same board.
++ *
++ * See analysis/02-daemon-mode-design.md in the kicad-perf repo.
++ */
++class DAEMON_COMMAND : public COMMAND
++{
++public:
++    DAEMON_COMMAND();
++
++protected:
++    int doPerform( KIWAY& aKiway ) override;
++};
++
++
++class DAEMON_START_COMMAND : public COMMAND
++{
++public:
++    DAEMON_START_COMMAND();
++
++protected:
++    int doPerform( KIWAY& aKiway ) override;
++};
++
++
++class DAEMON_STOP_COMMAND : public COMMAND
++{
++public:
++    DAEMON_STOP_COMMAND();
++
++protected:
++    int doPerform( KIWAY& aKiway ) override;
++};
++
++
++class DAEMON_STATUS_COMMAND : public COMMAND
++{
++public:
++    DAEMON_STATUS_COMMAND();
++
++protected:
++    int doPerform( KIWAY& aKiway ) override;
++};
++
++} // namespace CLI
++
++#endif // COMMAND_DAEMON_H
+diff --git a/kicad/kicad_cli.cpp b/kicad/kicad_cli.cpp
+index b3016a24..3e64ae0f 100644
+--- a/kicad/kicad_cli.cpp
++++ b/kicad/kicad_cli.cpp
+@@ -102,6 +102,7 @@
+ #include "cli/command_gerber_info.h"
+ #include "cli/command_gerber_diff.h"
+ #include "cli/command_api_server.h"
++#include "cli/command_daemon.h"
+ #include "cli/command_version.h"
+ #include "cli/exit_codes.h"
+ 
+@@ -226,6 +227,10 @@ static CLI::GERBER_INFO_COMMAND        gerberInfoCmd{};
+ static CLI::GERBER_DIFF_COMMAND        gerberDiffCmd{};
+ static CLI::VERSION_COMMAND            versionCmd{};
+ static CLI::API_SERVER_COMMAND         apiServerCmd{};
++static CLI::DAEMON_COMMAND             daemonCmd{};
++static CLI::DAEMON_START_COMMAND       daemonStartCmd{};
++static CLI::DAEMON_STOP_COMMAND        daemonStopCmd{};
++static CLI::DAEMON_STATUS_COMMAND      daemonStatusCmd{};
+ 
+ // clang-format off
+ static std::vector<COMMAND_ENTRY> commandStack = {
+@@ -388,6 +393,14 @@ static std::vector<COMMAND_ENTRY> commandStack = {
+     },
+     {
+         &apiServerCmd,
++    },
++    {
++        &daemonCmd,
++        {
++            { &daemonStartCmd },
++            { &daemonStopCmd },
++            { &daemonStatusCmd }
++        }
+     }
+ };
+ // clang-format on
+-- 
+2.39.5
+
