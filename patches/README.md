@@ -24,6 +24,7 @@ Each patch is a `git format-patch` output — `git am` or `git apply` clean.
 | 17 | `0017-loadglobaltables-once-per-process.patch`                                  | wrap the deferred `LoadGlobalTables()` in `std::call_once`. Fixes a regression from 0002 + 0010: under the daemon the tables were being re-parsed on every request, wiping the whole point of 0002. | daemon: recovers ~30-100 ms per request | trivial |
 | 18 | `0018-daemon-error-on-chdir-fail.patch`                                         | `handleOneClient` was silently ignoring `chdir()` errors. Now the client gets a specific error frame ("cannot chdir to client cwd '/path': No such file or directory") instead of a mysterious "board file does not exist" from the dispatcher. | robustness | trivial |
 | 19 | `0019-daemon-cap-request-alloc.patch`                                           | wire-protocol reader was capped per-arg (4 MB) but not cumulatively — a peer could ask for 4096 args × 4 MB = 16 GB alloc. New per-arg cap 1 MB and cumulative-request cap `kMaxFrame` (4 MB). | security / DoS hardening | trivial |
+| 20 | `0020-daemon-pid-reuse-defence.patch`                                           | `readLivePid` used only `kill(pid, 0)` — succeeds for ANY live same-user process, so a recycled PID would make `daemon stop` SIGTERM an unrelated process. Add a `/proc/<pid>/comm` prefix check for `kicad-cli`. | security | trivial |
 
 ## Expected combined win (theoretical, not yet measured)
 

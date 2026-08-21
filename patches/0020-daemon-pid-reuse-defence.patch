@@ -1,0 +1,81 @@
+From d5a5a8e012b59751b797192676200338ef49331f Mon Sep 17 00:00:00 2001
+From: icanc0 <ai7@vincentxie.net>
+Date: Fri, 21 Aug 2026 20:54:55 +0000
+Subject: [PATCH] =?UTF-8?q?P20:=20daemon=20=E2=80=94=20PID-reuse=20defence?=
+ =?UTF-8?q?=20in=20readLivePid?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Sweeping patch 0011: kill(pid, 0) confirms the pid is live and
+signalable, but not that it's OUR daemon. On a busy host the pid can
+be reused between the daemon crashing (pidfile survives) and 'daemon
+stop' reading it — we'd send SIGTERM to a random unrelated same-user
+process.
+
+Add a /proc/<pid>/comm prefix check for 'kicad-cli' after the kill(0)
+liveness probe. Non-Linux hosts (no /proc) fall through to the old
+behaviour (trust the pidfile). Keeps 'daemon stop' safe on Linux;
+still correct on other systems.
+---
+ kicad/cli/command_daemon.cpp | 34 ++++++++++++++++++++++++++++++++--
+ 1 file changed, 32 insertions(+), 2 deletions(-)
+
+diff --git a/kicad/cli/command_daemon.cpp b/kicad/cli/command_daemon.cpp
+index 29c21227..76dae3c4 100644
+--- a/kicad/cli/command_daemon.cpp
++++ b/kicad/cli/command_daemon.cpp
+@@ -101,7 +101,11 @@ static bool writePidfile( const wxString& aPidfilePath )
+ 
+ 
+ // Return the pid stored in the pidfile, or -1 if unreadable / malformed /
+-// pointing at a dead process.
++// pointing at a dead process, OR pointing at a live process that isn't
++// our daemon. The last check defends against PID reuse: on a busy host
++// the PID can be recycled by an unrelated process between the daemon
++// crashing (pidfile survives) and `daemon stop` reading it. Without
++// this check we'd SIGTERM the wrong process.
+ static int readLivePid( const wxString& aPidfilePath )
+ {
+     FILE* f = std::fopen( aPidfilePath.ToStdString().c_str(), "r" );
+@@ -116,10 +120,36 @@ static int readLivePid( const wxString& aPidfilePath )
+     if( matched != 1 || pid <= 1 )
+         return -1;
+ 
+-    // kill(pid, 0) succeeds iff the process exists AND we own it.
++    // kill(pid, 0) succeeds iff the process exists AND we can signal it
++    // (same-user or root). Same-user is what we need — the daemon is
++    // always same-user with the client.
+     if( ::kill( pid, 0 ) != 0 )
+         return -1;
+ 
++    // PID-reuse defence: verify the running process is actually a
++    // kicad-cli. On Linux we read /proc/PID/comm (kernel-maintained
++    // basename, no truncation issues for our binary name). On other
++    // systems, fall back to the older behaviour (trust the pidfile).
++    char procPath[64];
++    std::snprintf( procPath, sizeof( procPath ), "/proc/%d/comm", pid );
++
++    if( FILE* comm = std::fopen( procPath, "r" ) )
++    {
++        char name[128] = { 0 };
++        (void) std::fread( name, 1, sizeof( name ) - 1, comm );
++        std::fclose( comm );
++
++        // Trim trailing newline (which /proc always appends).
++        if( char* nl = std::strchr( name, '\n' ) )
++            *nl = '\0';
++
++        // Kernel truncates comm to TASK_COMM_LEN-1 = 15 chars.
++        // "kicad-cli" is 9 chars → fits; but we compare prefix to be
++        // tolerant of any suffix (e.g. "kicad-cli-9.0").
++        if( std::strncmp( name, "kicad-cli", 9 ) != 0 )
++            return -1;
++    }
++
+     return pid;
+ }
+ 
+-- 
+2.39.5
+
