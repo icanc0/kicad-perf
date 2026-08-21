@@ -1,0 +1,55 @@
+From 64b64d3e7a58a3ac7dbdb194ef53bd7eb692eb39 Mon Sep 17 00:00:00 2001
+From: icanc0 <ai7@vincentxie.net>
+Date: Fri, 21 Aug 2026 16:07:36 +0000
+Subject: [PATCH] =?UTF-8?q?P5:=20pgm=5Fbase=20=E2=80=94=20skip=20libcurl?=
+ =?UTF-8?q?=20+=20Sentry=20init=20in=20headless=20(kicad-cli)=20mode?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+KICAD_CURL::Init(), APP_MONITOR::SENTRY::Init(), and Sentry AddTag run
+unconditionally in InitPgm(). libcurl is only used by the update manager,
+PCM, API server. Sentry is telemetry. Neither is needed for kicad-cli's
+plot / export / DRC / gerber-info paths. Gate on aHeadless (already
+passed true from kicad_cli.cpp).
+---
+ common/pgm_base.cpp | 15 ++++++++++++---
+ 1 file changed, 12 insertions(+), 3 deletions(-)
+
+diff --git a/common/pgm_base.cpp b/common/pgm_base.cpp
+index e31f4fe6..2bed3ae6 100644
+--- a/common/pgm_base.cpp
++++ b/common/pgm_base.cpp
+@@ -350,9 +350,17 @@ bool PGM_BASE::InitPgm( bool aHeadless, bool aIsUnitTest )
+     // In particular, the user cache path is the most likely to be hit by startup code
+     PATHS::EnsureUserPathsExist();
+ 
+-    KICAD_CURL::Init();
++    // Perf: libcurl init and Sentry telemetry init are only needed for the
++    // update manager, PCM (package manager), API server, and crash reporting
++    // — none of which run in kicad-cli's plot / export / drc / gerber-info
++    // paths. Skip them in headless mode. The GUI apps still pay both costs
++    // as before.
++    if( !aHeadless )
++    {
++        KICAD_CURL::Init();
+ 
+-    APP_MONITOR::SENTRY::Instance()->Init();
++        APP_MONITOR::SENTRY::Instance()->Init();
++    }
+ 
+     // Initialize the singleton instance
+     m_singleton.Init();
+@@ -365,7 +373,8 @@ bool PGM_BASE::InitPgm( bool aHeadless, bool aIsUnitTest )
+     else
+         pgm_name = wxFileName( App().argv[0] ).GetName().Lower();
+ 
+-    APP_MONITOR::SENTRY::Instance()->AddTag( "kicad.app", pgm_name );
++    if( !aHeadless )
++        APP_MONITOR::SENTRY::Instance()->AddTag( "kicad.app", pgm_name );
+ 
+     wxInitAllImageHandlers();
+ 
+-- 
+2.39.5
+
