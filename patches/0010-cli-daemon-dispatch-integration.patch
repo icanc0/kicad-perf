@@ -1,0 +1,370 @@
+From b0ee0929a1fc12c121f5604eda244a377ce17874 Mon Sep 17 00:00:00 2001
+From: icanc0 <ai7@vincentxie.net>
+Date: Fri, 21 Aug 2026 17:57:47 +0000
+Subject: [PATCH] P10: extract OnPgmRun dispatch to CLI::RunKicadCliDispatch;
+ daemon uses it
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Two refactor threads land together:
+
+1. kicad/kicad_cli.cpp — moves the argparse-construction + subcommand
+   lookup + Perform call out of PGM_KICAD::OnPgmRun into a new file-
+   external CLI::RunKicadCliDispatch(argc, argv). OnPgmRun now just
+   forwards to it with m_argcUtf8/m_argvUtf8. Same behavior, one entry
+   point.
+
+2. kicad/cli/command_daemon.cpp — handleOneClient() now:
+     - dup2()s stdout/stderr into a pipe pair,
+     - chdir()s to the request's cwd (so relative -o and input paths
+       resolve where the client expected),
+     - calls RunKicadCliDispatch(argc, argv),
+     - restores stdio, drains the pipes, restores cwd,
+     - packages exit code + captured stdout + captured stderr into the
+       wire-protocol response.
+
+3. New kicad/cli/dispatch.h declares the extern for anyone else who
+   needs to dispatch (future in-process test hooks etc.).
+
+With this, a client that sends 'pcb export svg -l F.Cu board.kicad_pcb'
+into the socket gets a real SVG on disk and the daemon's captured
+stdout back — the whole point of the daemon. Syntax-checks clean under
+g++ -fsyntax-only -std=c++20. End-to-end run needs a full kicad build,
+which is still deferred (dep-chase blocker in benchmarks/00-baseline).
+---
+ kicad/cli/command_daemon.cpp | 148 ++++++++++++++++++++++++++++++-----
+ kicad/cli/dispatch.h         |  45 +++++++++++
+ kicad/kicad_cli.cpp          |  34 ++++++--
+ 3 files changed, 201 insertions(+), 26 deletions(-)
+ create mode 100644 kicad/cli/dispatch.h
+
+diff --git a/kicad/cli/command_daemon.cpp b/kicad/cli/command_daemon.cpp
+index b7a4a3b7..a29da545 100644
+--- a/kicad/cli/command_daemon.cpp
++++ b/kicad/cli/command_daemon.cpp
+@@ -18,6 +18,7 @@
+  */
+ 
+ #include "command_daemon.h"
++#include "dispatch.h"
+ #include <cli/exit_codes.h>
+ #include <wx/crt.h>
+ #include <wx/filename.h>
+@@ -30,6 +31,7 @@
+ #include <vector>
+ 
+ #include <errno.h>
++#include <fcntl.h>
+ #include <sys/socket.h>
+ #include <sys/stat.h>
+ #include <sys/types.h>
+@@ -323,11 +325,81 @@ static bool writeResponse( int aFd, int aExitCode, const std::string& aStdout,
+ }
+ 
+ 
+-// Per-client dispatch — reads one request frame, dispatches, writes response.
+-// Actual command dispatch through commandStack lands in the *next* patch;
+-// this one exercises framing end-to-end so the wire protocol can be
+-// integration-tested from a Python client before we wire in the real
+-// CLI runtime.
++// Capture stdout / stderr into pipes for one dispatch, restore afterwards.
++// Not thread-safe. Intended for a single-in-flight daemon (which is what
++// the MVP is).
++struct StdioCapture
++{
++    int saved_stdout = -1;
++    int saved_stderr = -1;
++    int pipe_stdout[2] = { -1, -1 };
++    int pipe_stderr[2] = { -1, -1 };
++
++    bool start()
++    {
++        saved_stdout = ::dup( STDOUT_FILENO );
++        saved_stderr = ::dup( STDERR_FILENO );
++
++        if( saved_stdout < 0 || saved_stderr < 0 )
++            return false;
++
++        if( ::pipe( pipe_stdout ) != 0 || ::pipe( pipe_stderr ) != 0 )
++            return false;
++
++        // Non-blocking on the read ends — we drain post-dispatch.
++        (void) ::fcntl( pipe_stdout[0], F_SETFL, O_NONBLOCK );
++        (void) ::fcntl( pipe_stderr[0], F_SETFL, O_NONBLOCK );
++
++        ::dup2( pipe_stdout[1], STDOUT_FILENO );
++        ::dup2( pipe_stderr[1], STDERR_FILENO );
++        ::close( pipe_stdout[1] );
++        ::close( pipe_stderr[1] );
++        return true;
++    }
++
++    // Restore original fds and return (stdout, stderr) capture.
++    std::pair<std::string, std::string> stop()
++    {
++        // Flush before restoring so any buffered text lands in the pipe.
++        std::fflush( stdout );
++        std::fflush( stderr );
++
++        ::dup2( saved_stdout, STDOUT_FILENO );
++        ::dup2( saved_stderr, STDERR_FILENO );
++        ::close( saved_stdout );
++        ::close( saved_stderr );
++        saved_stdout = saved_stderr = -1;
++
++        std::string outBuf, errBuf;
++        char        buf[4096];
++
++        for( ;; )
++        {
++            ssize_t n = ::read( pipe_stdout[0], buf, sizeof( buf ) );
++            if( n <= 0 )
++                break;
++            outBuf.append( buf, static_cast<size_t>( n ) );
++        }
++
++        for( ;; )
++        {
++            ssize_t n = ::read( pipe_stderr[0], buf, sizeof( buf ) );
++            if( n <= 0 )
++                break;
++            errBuf.append( buf, static_cast<size_t>( n ) );
++        }
++
++        ::close( pipe_stdout[0] );
++        ::close( pipe_stderr[0] );
++        pipe_stdout[0] = pipe_stderr[0] = -1;
++
++        return { std::move( outBuf ), std::move( errBuf ) };
++    }
++};
++
++
++// Per-client dispatch — reads request, redirects stdio, runs the CLI
++// command through the same code path OnPgmRun uses, sends response.
+ static void handleOneClient( int aClientFd )
+ {
+     ParsedRequest req;
+@@ -338,24 +410,64 @@ static void handleOneClient( int aClientFd )
+         return;
+     }
+ 
+-    // Placeholder: echo argv to stdout capture. The follow-up patch swaps
+-    // this for a real dispatch through PGM_KICAD::RunOneCliCommand().
+-    std::string capturedStdout;
++    if( req.argv.empty() )
++    {
++        writeResponse( aClientFd, /*exit=*/CLI::EXIT_CODES::ERR_ARGS,
++                       /*stdout=*/{}, /*stderr=*/"empty argv\n" );
++        ::close( aClientFd );
++        return;
++    }
++
++    // Build a C-style argv the dispatcher expects. RunKicadCliDispatch takes
++    // char** but doesn't mutate — we back it with a std::vector<std::string>
++    // owned by req.argv.
++    std::vector<char*> argvC;
++    argvC.reserve( req.argv.size() );
++
++    for( std::string& s : req.argv )
++        argvC.push_back( s.data() );
++
++    // Change to the client's cwd so relative paths (input .kicad_pcb,
++    // -o output/) resolve where the caller expected.
++    char* prevCwd = ::getcwd( nullptr, 0 );
++
++    if( !req.cwd.empty() )
++        (void) ::chdir( req.cwd.c_str() );
++
++    StdioCapture cap;
++    bool         captureOk = cap.start();
+ 
+-    for( size_t i = 0; i < req.argv.size(); ++i )
++    int exitCode = CLI::EXIT_CODES::ERR_UNKNOWN;
++
++    try
++    {
++        exitCode = CLI::RunKicadCliDispatch( static_cast<int>( argvC.size() ), argvC.data() );
++    }
++    catch( ... )
+     {
+-        capturedStdout += "argv[";
+-        capturedStdout += std::to_string( i );
+-        capturedStdout += "]=";
+-        capturedStdout += req.argv[i];
+-        capturedStdout += '\n';
++        exitCode = CLI::EXIT_CODES::ERR_UNKNOWN;
+     }
+ 
+-    capturedStdout += "cwd=";
+-    capturedStdout += req.cwd;
+-    capturedStdout += '\n';
++    std::string outBuf, errBuf;
++
++    if( captureOk )
++    {
++        auto p = cap.stop();
++        outBuf = std::move( p.first );
++        errBuf = std::move( p.second );
++    }
++    else
++    {
++        errBuf = "daemon: stdio capture failed\n";
++    }
++
++    if( prevCwd )
++    {
++        (void) ::chdir( prevCwd );
++        std::free( prevCwd );
++    }
+ 
+-    writeResponse( aClientFd, /*exit=*/0, capturedStdout, /*stderr=*/std::string() );
++    writeResponse( aClientFd, exitCode, outBuf, errBuf );
+     ::close( aClientFd );
+ }
+ 
+diff --git a/kicad/cli/dispatch.h b/kicad/cli/dispatch.h
+new file mode 100644
+index 00000000..75f30283
+--- /dev/null
++++ b/kicad/cli/dispatch.h
+@@ -0,0 +1,45 @@
++/*
++ * This program source code file is part of KiCad, a free EDA CAD application.
++ *
++ * Copyright The KiCad Developers, see AUTHORS.txt for contributors.
++ *
++ * This program is free software: you can redistribute it and/or modify it
++ * under the terms of the GNU General Public License as published by the
++ * Free Software Foundation, either version 3 of the License, or (at your
++ * option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful, but
++ * WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
++ */
++
++#ifndef CLI_DISPATCH_H
++#define CLI_DISPATCH_H
++
++namespace CLI
++{
++
++/**
++ * Run one kicad-cli invocation.
++ *
++ * Argv is (argc, argv) UTF-8 as delivered by wx / by a daemon request
++ * frame. Returns the CLI::EXIT_CODES value the underlying command handler
++ * returned (0 = success).
++ *
++ * Both `PGM_KICAD::OnPgmRun()` and the daemon dispatcher call this so
++ * every invocation, direct or remote, goes through the exact same
++ * argparse + subcommand-lookup + Perform path.
++ *
++ * Thread-safety: not re-entrant. Callers must serialize (the daemon does
++ * one client at a time by design; see analysis/02-daemon-mode-design.md
++ * safety concerns).
++ */
++int RunKicadCliDispatch( int argc, char** argv );
++
++} // namespace CLI
++
++#endif // CLI_DISPATCH_H
+diff --git a/kicad/kicad_cli.cpp b/kicad/kicad_cli.cpp
+index 3e64ae0f..79fb6942 100644
+--- a/kicad/kicad_cli.cpp
++++ b/kicad/kicad_cli.cpp
+@@ -104,6 +104,7 @@
+ #include "cli/command_api_server.h"
+ #include "cli/command_daemon.h"
+ #include "cli/command_version.h"
++#include "cli/dispatch.h"
+ #include "cli/exit_codes.h"
+ 
+ // Add this header after all others, to avoid a collision name in a Windows header
+@@ -546,9 +547,15 @@ bool PGM_KICAD::OnPgmInit()
+ }
+ 
+ 
+-int PGM_KICAD::OnPgmRun()
++// Reusable one-shot dispatcher. Called by OnPgmRun() for direct CLI use
++// and by the daemon (kicad/cli/command_daemon.cpp) for each incoming
++// request. Extracted from OnPgmRun so both paths agree on argparse tree
++// shape, error handling, --help / --version routing, and LoadGlobalTables
++// timing.
++int CLI::RunKicadCliDispatch( int argc, char** argv )
+ {
+-    argparse::ArgumentParser argParser( std::string( "kicad-cli" ), GetMajorMinorVersion().ToStdString(),
++    argparse::ArgumentParser argParser( std::string( "kicad-cli" ),
++                                        PGM_BASE::GetMajorMinorVersion().ToStdString(),
+                                         argparse::default_arguments::none );
+ 
+     argParser.add_argument( "-v", ARG_VERSION )
+@@ -570,9 +577,9 @@ int PGM_KICAD::OnPgmRun()
+     std::string wantedCommand;
+     bool        topLevelHelp = false;
+ 
+-    for( int i = 1; i < m_argcUtf8; ++i )
++    for( int i = 1; i < argc; ++i )
+     {
+-        std::string arg( m_argvUtf8[i] );
++        std::string arg( argv[i] );
+ 
+         if( arg == ARG_HELP_SHORT || arg == ARG_HELP )
+         {
+@@ -621,7 +628,7 @@ int PGM_KICAD::OnPgmRun()
+ 
+         // Pre-process arguments to handle negative vector values (e.g., --rotate -45,0,45)
+         // which argparse would otherwise interpret as unknown options
+-        std::vector<std::string> args = preprocessArgs( m_argcUtf8, m_argvUtf8 );
++        std::vector<std::string> args = preprocessArgs( argc, argv );
+         argParser.parse_args( args );
+     }
+     // std::runtime_error doesn't seem to be enough for the scan<>()
+@@ -629,9 +636,9 @@ int PGM_KICAD::OnPgmRun()
+     {
+         bool requestedHelp = false;
+ 
+-        for( int i = 0; i < m_argcUtf8; ++i )
++        for( int i = 0; i < argc; ++i )
+         {
+-            if( std::string arg( m_argvUtf8[i] ); arg == ARG_HELP_SHORT || arg == ARG_HELP )
++            if( std::string arg( argv[i] ); arg == ARG_HELP_SHORT || arg == ARG_HELP )
+             {
+                 requestedHelp = true;
+                 break;
+@@ -701,7 +708,7 @@ int PGM_KICAD::OnPgmRun()
+     {
+         // Load global sym/fp/design-block tables lazily. Skips --help,
+         // --version, and argparse-error paths.
+-        GetLibraryManager().LoadGlobalTables();
++        Pgm().GetLibraryManager().LoadGlobalTables();
+ 
+         int exitCode = cliCmd->Perform( Kiway );
+ 
+@@ -723,6 +730,17 @@ int PGM_KICAD::OnPgmRun()
+ }
+ 
+ 
++int PGM_KICAD::OnPgmRun()
++{
++    int exitCode = CLI::RunKicadCliDispatch( m_argcUtf8, m_argvUtf8 );
++
++    // Preserve legacy fall-through: if RunKicadCliDispatch fell into the
++    // "no command matched" branch it already printed help and returned
++    // ERR_ARGS. Nothing else to do here.
++    return exitCode;
++}
++
++
+ void PGM_KICAD::OnPgmExit()
+ {
+     // Abort and wait on any background jobs. With lazy thread-pool init, if
+-- 
+2.39.5
+
