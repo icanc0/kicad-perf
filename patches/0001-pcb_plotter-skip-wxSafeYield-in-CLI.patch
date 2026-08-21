@@ -1,0 +1,38 @@
+From: icanc0 <ai7@vincentxie.net>
+Date: 2026-08-21
+Subject: [PATCH 1/N] pcb_plotter: skip wxSafeYield in the per-layer loop for CLI
+
+`PCB_PLOTTER::Plot` calls `wxSafeYield()` after each layer to let the GUI
+event loop repaint the progress reporter. In CLI headless mode there is no
+event loop, no dialog, no repaint target — the yield is pure overhead that
+still enters wx's yield machinery (locks, event dispatch prep) and returns.
+
+For a plot job over N layers this is N wasted yield cycles.
+
+Gate on Pgm().IsGUI(). This mirrors the same signal `getBoard()` in
+pcbnew_jobs_handler.cpp already uses to distinguish CLI from GUI.
+
+Safe because:
+
+- GUI callers still get the yield (behavior preserved for interactive plot).
+- CLI has no progress dialog to repaint, and the reporter it does have
+  writes directly to stdout/stderr without needing the event loop.
+
+---
+ pcbnew/pcb_plotter.cpp | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/pcbnew/pcb_plotter.cpp b/pcbnew/pcb_plotter.cpp
+--- a/pcbnew/pcb_plotter.cpp
++++ b/pcbnew/pcb_plotter.cpp
+@@ -308,7 +308,8 @@ bool PCB_PLOTTER::Plot( const wxString& aOutputPath, const LSEQ& aLayersToPlot,
+         }
+
+         pageNum++;
+
+-        wxSafeYield(); // displays report message.
++        if( Pgm().IsGUI() )
++            wxSafeYield(); // displays report message.
+     }
+
+     if( jobfile_writer && m_plotOpts.GetCreateGerberJobFile() )
