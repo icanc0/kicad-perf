@@ -1,0 +1,97 @@
+From 547e390a920e8c9642579e9a34a5d8f3590a6150 Mon Sep 17 00:00:00 2001
+From: icanc0 <ai7@vincentxie.net>
+Date: Fri, 21 Aug 2026 18:58:42 +0000
+Subject: [PATCH] =?UTF-8?q?P15:=20daemon=20=E2=80=94=20per-dispatch=20rese?=
+ =?UTF-8?q?t=20guard=20for=20wxLog=20+=20C=20locale?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Small scope guard PerDispatchReset around each daemon dispatch that
+snapshots wxLog::GetActiveTarget() and the current C locale (setlocale
+LC_ALL, nullptr), and restores both on scope exit.
+
+Motivation: LOCALE_IO inside RunKicadCliDispatch is already scoped, so
+the locale case is defense-in-depth against any command that might
+call setlocale() itself without a matching restore. wxLog is the real
+concern — several existing commands install a temporary wxLogNull /
+wxLogStream during their body and rely on stack unwinding to pop it.
+Under the daemon those all run in one process, so a bug in one command
+would leak a stale sink to the next dispatch.
+
+This closes one of the open items in analysis/02-daemon-mode-design.md.
+Syntax-checks clean.
+---
+ kicad/cli/command_daemon.cpp | 40 ++++++++++++++++++++++++++++++++++++
+ 1 file changed, 40 insertions(+)
+
+diff --git a/kicad/cli/command_daemon.cpp b/kicad/cli/command_daemon.cpp
+index 6667f77a..fbb39011 100644
+--- a/kicad/cli/command_daemon.cpp
++++ b/kicad/cli/command_daemon.cpp
+@@ -22,8 +22,10 @@
+ #include <cli/exit_codes.h>
+ #include <wx/crt.h>
+ #include <wx/filename.h>
++#include <wx/log.h>
+ 
+ #include <atomic>
++#include <clocale>
+ #include <csignal>
+ #include <cstdlib>
+ #include <cstring>
+@@ -374,6 +376,39 @@ static bool writeResponse( int aFd, int aExitCode, const std::string& aStdout,
+ }
+ 
+ 
++// Per-dispatch reset scope — snapshots process-global state that CLI
++// commands might mutate (wxLog active target, C locale via setlocale)
++// and restores it when the scope exits. Keeps the daemon's second
++// dispatch from inheriting garbage from the first.
++struct PerDispatchReset
++{
++    wxLog*      saved_wxlog = nullptr;
++    std::string saved_locale;
++
++    PerDispatchReset()
++    {
++        saved_wxlog = wxLog::GetActiveTarget();
++
++        // Save current global C locale. LOCALE_IO inside RunKicadCliDispatch
++        // uses this too, but nested-scope-guards are safe.
++        if( const char* lc = std::setlocale( LC_ALL, nullptr ); lc )
++            saved_locale = lc;
++    }
++
++    ~PerDispatchReset()
++    {
++        // Restore wxLog first: some commands install a temporary sink to
++        // capture their own messages and forget to pop it. Restoring here
++        // protects the next dispatch.
++        if( wxLog::GetActiveTarget() != saved_wxlog )
++            wxLog::SetActiveTarget( saved_wxlog );
++
++        if( !saved_locale.empty() )
++            std::setlocale( LC_ALL, saved_locale.c_str() );
++    }
++};
++
++
+ // Capture stdout / stderr into pipes for one dispatch, restore afterwards.
+ // Not thread-safe. Intended for a single-in-flight daemon (which is what
+ // the MVP is).
+@@ -483,6 +518,11 @@ static void handleOneClient( int aClientFd )
+     if( !req.cwd.empty() )
+         (void) ::chdir( req.cwd.c_str() );
+ 
++    // Snapshot process-global mutable state that CLI commands might set
++    // and forget to restore. Destructor at scope exit puts it back so the
++    // *next* dispatch starts from the same baseline as the first.
++    PerDispatchReset resetGuard;
++
+     StdioCapture cap;
+     bool         captureOk = cap.start();
+ 
+-- 
+2.39.5
+
