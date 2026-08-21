@@ -1,0 +1,252 @@
+From 413f63106d5c6e12546361a95bbb8d7bce2bfbcc Mon Sep 17 00:00:00 2001
+From: icanc0 <ai7@vincentxie.net>
+Date: Fri, 21 Aug 2026 17:37:33 +0000
+Subject: [PATCH] =?UTF-8?q?P8:=20daemon=20start=20body=20=E2=80=94=20real?=
+ =?UTF-8?q?=20Unix-socket=20bind/listen/accept=20loop?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Fills in DAEMON_START_COMMAND::doPerform with:
+  - default socket path ($XDG_RUNTIME_DIR/kicad-cli.sock or /tmp fallback)
+  - socket() + bind() + chmod(0600) + listen() with clear error paths
+  - SIGINT/SIGTERM handler that flips g_daemonExitRequested
+  - SIGPIPE ignored so a client abort doesn't kill the daemon
+  - accept4() loop with EINTR retry, per-client handler stub
+  - clean shutdown: close() + unlink()
+
+The handleOneClient() stub reads up to 64K from the client and sends back
+an exit-frame with code 0. Argv parsing / commandStack dispatch /
+stdout+stderr streaming land in the follow-up patch (already large
+enough here). Syntax-checks clean under g++ -fsyntax-only -std=c++20.
+
+Sockets: analysis/02-daemon-mode-design.md, wire protocol section.
+---
+ kicad/cli/command_daemon.cpp | 198 +++++++++++++++++++++++++++++++++--
+ 1 file changed, 190 insertions(+), 8 deletions(-)
+
+diff --git a/kicad/cli/command_daemon.cpp b/kicad/cli/command_daemon.cpp
+index 647396d7..f9a72165 100644
+--- a/kicad/cli/command_daemon.cpp
++++ b/kicad/cli/command_daemon.cpp
+@@ -20,16 +20,148 @@
+ #include "command_daemon.h"
+ #include <cli/exit_codes.h>
+ #include <wx/crt.h>
++#include <wx/filename.h>
+ 
+-// This file is the scaffolding for `kicad-cli daemon {start,stop,status}`.
+-// See analysis/02-daemon-mode-design.md for the plan. Subsequent patches
+-// wire in the actual Unix-socket server, client stub, dispatcher, and
+-// per-path BOARD cache.
++#include <atomic>
++#include <csignal>
++#include <cstdlib>
++#include <cstring>
++#include <string>
++#include <vector>
++
++#include <errno.h>
++#include <sys/socket.h>
++#include <sys/stat.h>
++#include <sys/types.h>
++#include <sys/un.h>
++#include <unistd.h>
++
++// Real server body — MVP: bind, listen, accept, echo. Argv dispatch and
++// stdout/stderr streaming land in the next patch (this one is already
++// non-trivial and I want to keep the diff reviewable).
++//
++// Design: analysis/02-daemon-mode-design.md.
+ 
+ 
+ #define ARG_SOCKET "--socket"
+ 
+ 
++namespace
++{
++
++std::atomic_bool g_daemonExitRequested{ false };
++
++void daemonSignalHandler( int )
++{
++    g_daemonExitRequested.store( true );
++}
++
++
++static wxString defaultSocketPath()
++{
++    // Prefer $XDG_RUNTIME_DIR (usually /run/user/$UID, tmpfs, per-user).
++    // Fall back to /tmp/kicad-cli-$UID.sock so unit-test hosts without a
++    // runtime dir still work.
++    const char* xdg = std::getenv( "XDG_RUNTIME_DIR" );
++
++    if( xdg && xdg[0] )
++        return wxString::Format( wxT( "%s/kicad-cli.sock" ), wxString::FromUTF8( xdg ) );
++
++    return wxString::Format( wxT( "/tmp/kicad-cli-%u.sock" ), (unsigned) ::getuid() );
++}
++
++
++// Bind + listen on a Unix stream socket at `aPath`. Returns the listening
++// fd or -1 on error, writing the reason into aError.
++static int bindListenUnixSocket( const wxString& aPath, wxString& aError )
++{
++    std::string p = aPath.ToStdString();
++
++    if( p.size() >= sizeof( sockaddr_un{}.sun_path ) )
++    {
++        aError = wxString::Format( wxT( "socket path too long (%zu bytes; limit %zu)" ),
++                                   p.size(), sizeof( sockaddr_un{}.sun_path ) - 1 );
++        return -1;
++    }
++
++    int fd = ::socket( AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0 );
++
++    if( fd < 0 )
++    {
++        aError = wxString::Format( wxT( "socket(): %s" ), wxString::FromUTF8( strerror( errno ) ) );
++        return -1;
++    }
++
++    // If a stale socket file is there, remove it. A live daemon at the same
++    // path would fail the connect probe below (added in a follow-up patch);
++    // for now, unlink is safe because we haven't shipped the pid check yet.
++    ::unlink( p.c_str() );
++
++    sockaddr_un addr = {};
++    addr.sun_family = AF_UNIX;
++    std::memcpy( addr.sun_path, p.c_str(), p.size() );
++
++    if( ::bind( fd, reinterpret_cast<sockaddr*>( &addr ), sizeof( addr ) ) != 0 )
++    {
++        aError = wxString::Format( wxT( "bind(%s): %s" ), aPath,
++                                   wxString::FromUTF8( strerror( errno ) ) );
++        ::close( fd );
++        return -1;
++    }
++
++    // 0600 — this-user-only. See safety notes in the design doc.
++    if( ::chmod( p.c_str(), S_IRUSR | S_IWUSR ) != 0 )
++    {
++        aError = wxString::Format( wxT( "chmod(%s, 0600): %s" ), aPath,
++                                   wxString::FromUTF8( strerror( errno ) ) );
++        ::close( fd );
++        ::unlink( p.c_str() );
++        return -1;
++    }
++
++    if( ::listen( fd, /*backlog=*/8 ) != 0 )
++    {
++        aError = wxString::Format( wxT( "listen(): %s" ),
++                                   wxString::FromUTF8( strerror( errno ) ) );
++        ::close( fd );
++        ::unlink( p.c_str() );
++        return -1;
++    }
++
++    return fd;
++}
++
++
++// Placeholder: read the request-argv frame from the client and print it.
++// Real dispatch (parse JSON → argv, run through commandStack, stream
++// stdout/stderr) is in the follow-up patch.
++static void handleOneClient( int aClientFd )
++{
++    constexpr size_t kMaxRequest = 64 * 1024;
++    std::vector<char> buf( kMaxRequest );
++
++    ssize_t n = ::recv( aClientFd, buf.data(), buf.size() - 1, 0 );
++
++    if( n <= 0 )
++    {
++        ::close( aClientFd );
++        return;
++    }
++
++    buf[static_cast<size_t>( n )] = '\0';
++
++    // For now, echo back a "not yet dispatching" response frame. Real
++    // dispatch lands next patch.
++    const char* reply =
++            "x1\n0\n"; // exit frame, length 0 (see wire protocol in design doc)
++
++    ::send( aClientFd, reply, std::strlen( reply ), MSG_NOSIGNAL );
++    ::close( aClientFd );
++}
++
++} // namespace
++
++
+ CLI::DAEMON_COMMAND::DAEMON_COMMAND() : COMMAND( "daemon" )
+ {
+     m_argParser.add_description(
+@@ -60,10 +192,60 @@ CLI::DAEMON_START_COMMAND::DAEMON_START_COMMAND() : COMMAND( "start" )
+ 
+ int CLI::DAEMON_START_COMMAND::doPerform( KIWAY& )
+ {
+-    wxFprintf( stderr,
+-               _( "daemon start: not yet implemented (scaffold only).\n"
+-                  "See analysis/02-daemon-mode-design.md for the plan.\n" ) );
+-    return EXIT_CODES::ERR_UNKNOWN;
++    wxString socketPath = wxString::FromUTF8( m_argParser.get<std::string>( ARG_SOCKET ) );
++
++    if( socketPath.IsEmpty() )
++        socketPath = defaultSocketPath();
++
++    // Ensure parent dir exists (XDG_RUNTIME_DIR always should; belt+braces).
++    wxFileName sockFn( socketPath );
++    if( !wxFileName::DirExists( sockFn.GetPath() ) )
++    {
++        if( !wxFileName::Mkdir( sockFn.GetPath(), 0700, wxPATH_MKDIR_FULL ) )
++        {
++            wxFprintf( stderr, _( "daemon start: cannot create parent directory %s\n" ),
++                       sockFn.GetPath() );
++            return EXIT_CODES::ERR_UNKNOWN;
++        }
++    }
++
++    wxString err;
++    int      listenFd = bindListenUnixSocket( socketPath, err );
++
++    if( listenFd < 0 )
++    {
++        wxFprintf( stderr, _( "daemon start: %s\n" ), err );
++        return EXIT_CODES::ERR_UNKNOWN;
++    }
++
++    wxFprintf( stdout, _( "kicad-cli daemon listening on %s (pid %d)\n" ),
++               socketPath, (int) ::getpid() );
++
++    std::signal( SIGINT, daemonSignalHandler );
++    std::signal( SIGTERM, daemonSignalHandler );
++    std::signal( SIGPIPE, SIG_IGN );
++
++    while( !g_daemonExitRequested.load() )
++    {
++        int clientFd = ::accept4( listenFd, nullptr, nullptr, SOCK_CLOEXEC );
++
++        if( clientFd < 0 )
++        {
++            if( errno == EINTR )
++                continue;
++            wxFprintf( stderr, _( "daemon: accept(): %s\n" ),
++                       wxString::FromUTF8( strerror( errno ) ) );
++            break;
++        }
++
++        handleOneClient( clientFd );
++    }
++
++    ::close( listenFd );
++    ::unlink( socketPath.ToStdString().c_str() );
++
++    wxFprintf( stdout, _( "kicad-cli daemon shut down cleanly.\n" ) );
++    return EXIT_CODES::OK;
+ }
+ 
+ 
+-- 
+2.39.5
+
