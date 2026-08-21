@@ -1,0 +1,238 @@
+From 5eccb6d73939d5b2727284c68082bceacab34f07 Mon Sep 17 00:00:00 2001
+From: icanc0 <ai7@vincentxie.net>
+Date: Fri, 21 Aug 2026 18:07:34 +0000
+Subject: [PATCH] P11: daemon stop + status via pidfile
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+daemon start writes $SOCKET_PATH.pid at bind time, unlinks it on clean
+shutdown. New helpers pidfilePathFor / writePidfile / readLivePid
+(which returns -1 for missing pidfile OR dead-pid pidfile via kill(0)
+probe).
+
+daemon stop reads the pidfile, sends SIGTERM (the existing
+daemonSignalHandler already flips g_daemonExitRequested), polls up to
+2s for the pidfile to disappear.
+
+daemon status reports RUNNING with pid + socket, STALE if pidfile
+points to a dead pid, NOT RUNNING otherwise. When pidfile looks
+healthy, also probes the socket with a connect() to verify accept()
+is actually running — catches half-crashed daemons.
+
+Also refuses to daemon start if a live daemon is already at the same
+socket path. Syntax-checks clean.
+---
+ kicad/cli/command_daemon.cpp | 157 ++++++++++++++++++++++++++++++++++-
+ 1 file changed, 154 insertions(+), 3 deletions(-)
+
+diff --git a/kicad/cli/command_daemon.cpp b/kicad/cli/command_daemon.cpp
+index a29da545..b7a86db8 100644
+--- a/kicad/cli/command_daemon.cpp
++++ b/kicad/cli/command_daemon.cpp
+@@ -30,12 +30,15 @@
+ #include <string>
+ #include <vector>
+ 
++#include <algorithm>
+ #include <errno.h>
+ #include <fcntl.h>
++#include <signal.h>
+ #include <sys/socket.h>
+ #include <sys/stat.h>
+ #include <sys/types.h>
+ #include <sys/un.h>
++#include <time.h>
+ #include <unistd.h>
+ 
+ // Real server body — MVP: bind, listen, accept, echo. Argv dispatch and
+@@ -73,6 +76,52 @@ static wxString defaultSocketPath()
+ }
+ 
+ 
++static wxString pidfilePathFor( const wxString& aSocketPath )
++{
++    return aSocketPath + wxT( ".pid" );
++}
++
++
++// Write our pid to <socket>.pid; return true on success. Best-effort — if
++// this fails, the daemon still runs, but `daemon stop` won't have a way
++// to find it.
++static bool writePidfile( const wxString& aPidfilePath )
++{
++    FILE* f = std::fopen( aPidfilePath.ToStdString().c_str(), "w" );
++
++    if( !f )
++        return false;
++
++    std::fprintf( f, "%d\n", (int) ::getpid() );
++    std::fclose( f );
++    return true;
++}
++
++
++// Return the pid stored in the pidfile, or -1 if unreadable / malformed /
++// pointing at a dead process.
++static int readLivePid( const wxString& aPidfilePath )
++{
++    FILE* f = std::fopen( aPidfilePath.ToStdString().c_str(), "r" );
++
++    if( !f )
++        return -1;
++
++    int pid = 0;
++    int matched = std::fscanf( f, "%d", &pid );
++    std::fclose( f );
++
++    if( matched != 1 || pid <= 1 )
++        return -1;
++
++    // kill(pid, 0) succeeds iff the process exists AND we own it.
++    if( ::kill( pid, 0 ) != 0 )
++        return -1;
++
++    return pid;
++}
++
++
+ // Bind + listen on a Unix stream socket at `aPath`. Returns the listening
+ // fd or -1 on error, writing the reason into aError.
+ static int bindListenUnixSocket( const wxString& aPath, wxString& aError )
+@@ -530,6 +579,24 @@ int CLI::DAEMON_START_COMMAND::doPerform( KIWAY& )
+         return EXIT_CODES::ERR_UNKNOWN;
+     }
+ 
++    wxString pidfilePath = pidfilePathFor( socketPath );
++
++    if( int alive = readLivePid( pidfilePath ); alive > 0 )
++    {
++        wxFprintf( stderr,
++                   _( "daemon start: another daemon (pid %d) is already running at %s.\n"
++                      "Run 'kicad-cli daemon stop' first, or remove %s if you are sure it is stale.\n" ),
++                   alive, socketPath, pidfilePath );
++        ::close( listenFd );
++        return EXIT_CODES::ERR_UNKNOWN;
++    }
++
++    if( !writePidfile( pidfilePath ) )
++    {
++        wxFprintf( stderr, _( "daemon start: warning: could not write pidfile %s\n" ),
++                   pidfilePath );
++    }
++
+     wxFprintf( stdout, _( "kicad-cli daemon listening on %s (pid %d)\n" ),
+                socketPath, (int) ::getpid() );
+ 
+@@ -555,6 +622,7 @@ int CLI::DAEMON_START_COMMAND::doPerform( KIWAY& )
+ 
+     ::close( listenFd );
+     ::unlink( socketPath.ToStdString().c_str() );
++    ::unlink( pidfilePath.ToStdString().c_str() );
+ 
+     wxFprintf( stdout, _( "kicad-cli daemon shut down cleanly.\n" ) );
+     return EXIT_CODES::OK;
+@@ -575,7 +643,43 @@ CLI::DAEMON_STOP_COMMAND::DAEMON_STOP_COMMAND() : COMMAND( "stop" )
+ 
+ int CLI::DAEMON_STOP_COMMAND::doPerform( KIWAY& )
+ {
+-    wxFprintf( stderr, _( "daemon stop: not yet implemented (scaffold only).\n" ) );
++    wxString socketPath = wxString::FromUTF8( m_argParser.get<std::string>( ARG_SOCKET ) );
++
++    if( socketPath.IsEmpty() )
++        socketPath = defaultSocketPath();
++
++    wxString pidfilePath = pidfilePathFor( socketPath );
++    int      pid         = readLivePid( pidfilePath );
++
++    if( pid <= 0 )
++    {
++        wxFprintf( stderr, _( "daemon stop: no running daemon found at %s\n" ), socketPath );
++        return EXIT_CODES::ERR_UNKNOWN;
++    }
++
++    if( ::kill( pid, SIGTERM ) != 0 )
++    {
++        wxFprintf( stderr, _( "daemon stop: kill(%d, SIGTERM) failed: %s\n" ), pid,
++                   wxString::FromUTF8( strerror( errno ) ) );
++        return EXIT_CODES::ERR_UNKNOWN;
++    }
++
++    // Poll for exit — daemon should tear down its accept loop and unlink
++    // the pidfile. Give it up to ~2 s (accept4 is blocking on the current
++    // client, so worst-case one dispatch has to complete first).
++    for( int attempt = 0; attempt < 200; ++attempt )
++    {
++        if( readLivePid( pidfilePath ) <= 0 )
++        {
++            wxFprintf( stdout, _( "daemon stopped (pid %d).\n" ), pid );
++            return EXIT_CODES::OK;
++        }
++
++        struct timespec ts { 0, 10 * 1000 * 1000 }; // 10 ms
++        (void) ::nanosleep( &ts, nullptr );
++    }
++
++    wxFprintf( stderr, _( "daemon stop: SIGTERM sent but daemon (pid %d) did not exit in 2s.\n" ), pid );
+     return EXIT_CODES::ERR_UNKNOWN;
+ }
+ 
+@@ -594,6 +698,53 @@ CLI::DAEMON_STATUS_COMMAND::DAEMON_STATUS_COMMAND() : COMMAND( "status" )
+ 
+ int CLI::DAEMON_STATUS_COMMAND::doPerform( KIWAY& )
+ {
+-    wxFprintf( stderr, _( "daemon status: not yet implemented (scaffold only).\n" ) );
+-    return EXIT_CODES::ERR_UNKNOWN;
++    wxString socketPath = wxString::FromUTF8( m_argParser.get<std::string>( ARG_SOCKET ) );
++
++    if( socketPath.IsEmpty() )
++        socketPath = defaultSocketPath();
++
++    wxString pidfilePath = pidfilePathFor( socketPath );
++    int      pid         = readLivePid( pidfilePath );
++
++    if( pid <= 0 )
++    {
++        // Distinguish "no pidfile" vs "pidfile points at dead pid".
++        struct stat st{};
++
++        if( ::stat( pidfilePath.ToStdString().c_str(), &st ) == 0 )
++        {
++            wxFprintf( stdout, _( "kicad-cli daemon: STALE — pidfile %s present but process not running.\n" ),
++                       pidfilePath );
++            return EXIT_CODES::ERR_UNKNOWN;
++        }
++
++        wxFprintf( stdout, _( "kicad-cli daemon: NOT RUNNING (no pidfile at %s)\n" ),
++                   pidfilePath );
++        return EXIT_CODES::ERR_UNKNOWN;
++    }
++
++    // Probe the socket to make sure the daemon is actually accepting.
++    int fd = ::socket( AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0 );
++
++    if( fd >= 0 )
++    {
++        sockaddr_un addr{};
++        addr.sun_family = AF_UNIX;
++        std::string sp  = socketPath.ToStdString();
++        std::memcpy( addr.sun_path, sp.c_str(), std::min( sp.size(), sizeof( addr.sun_path ) - 1 ) );
++
++        int connected = ::connect( fd, reinterpret_cast<sockaddr*>( &addr ), sizeof( addr ) );
++        ::close( fd );
++
++        if( connected != 0 )
++        {
++            wxFprintf( stdout,
++                       _( "kicad-cli daemon: RUNNING (pid %d) but socket %s not accepting: %s\n" ),
++                       pid, socketPath, wxString::FromUTF8( strerror( errno ) ) );
++            return EXIT_CODES::ERR_UNKNOWN;
++        }
++    }
++
++    wxFprintf( stdout, _( "kicad-cli daemon: RUNNING (pid %d, socket %s)\n" ), pid, socketPath );
++    return EXIT_CODES::OK;
+ }
+-- 
+2.39.5
+
