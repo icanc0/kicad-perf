@@ -1,0 +1,74 @@
+From f35d0edc149865f253471b3de6aee5d8cb3fb5f5 Mon Sep 17 00:00:00 2001
+From: icanc0 <ai7@vincentxie.net>
+Date: Fri, 21 Aug 2026 22:26:26 +0000
+Subject: [PATCH] P24: extend 128 KB stdio buffering to gerber workFile and
+ excellon drill writer
+
+Patch 0022 wrapped PLOTTER::OpenFile. Two adjacent code paths that
+opened FILE* directly (bypassing PLOTTER::OpenFile) still used the
+default BUFSIZ buffer:
+
+  - GERBER_PLOTTER swaps in a temp workFile via wxFileName::CreateTempFileName
+    at the top of StartPlot to avoid network-share buffering issues on
+    the final file. That workFile is where all the actual gerber
+    output goes.
+  - EXCELLON_WRITER::CreateDrillandMapFilesSet and its backdrill sibling
+    open the .drl output directly with wxFopen.
+
+Give each of these a setvbuf(_IOFBF) with a reasonably big buffer
+(128 KB gerber, 64 KB drill). Same rationale as 0022.
+---
+ common/plotters/GERBER_plotter.cpp            |  6 ++++++
+ pcbnew/exporters/gendrill_excellon_writer.cpp | 12 ++++++++++++
+ 2 files changed, 18 insertions(+)
+
+diff --git a/common/plotters/GERBER_plotter.cpp b/common/plotters/GERBER_plotter.cpp
+index ded54b0a..b9c67cde 100644
+--- a/common/plotters/GERBER_plotter.cpp
++++ b/common/plotters/GERBER_plotter.cpp
+@@ -261,6 +261,12 @@ bool GERBER_PLOTTER::StartPlot( const wxString& aPageNumber )
+     if( m_outputFile == nullptr )
+         return false;
+ 
++    // Perf (kicad-perf 0022 companion): PLOTTER::OpenFile's setvbuf is on
++    // finalFile; the gerber path swaps in a temp workFile here that
++    // bypasses that. Give the workFile the same 128 KB buffer so the
++    // hot per-track write() count stays low.
++    (void) std::setvbuf( m_outputFile, nullptr, _IOFBF, 128 * 1024 );
++
+     for( unsigned ii = 0; ii < m_headerExtraLines.GetCount(); ii++ )
+     {
+         if( ! m_headerExtraLines[ii].IsEmpty() )
+diff --git a/pcbnew/exporters/gendrill_excellon_writer.cpp b/pcbnew/exporters/gendrill_excellon_writer.cpp
+index 45b6aaf1..234a3825 100644
+--- a/pcbnew/exporters/gendrill_excellon_writer.cpp
++++ b/pcbnew/exporters/gendrill_excellon_writer.cpp
+@@ -127,6 +127,14 @@ bool EXCELLON_WRITER::CreateDrillandMapFilesSet( const wxString& aPlotDirectory,
+                     }
+                 }
+ 
++                // Perf: default stdio buffer is BUFSIZ (~4-8 KB). Excellon
++                // drill files pump one line per hole through fmt::print —
++                // a board with 10k holes triggers ~30 write() syscalls on
++                // the default buffer. 64 KB is plenty for any drill file.
++                // The buffer is set to nullptr so stdio allocates its
++                // own — safe when the FILE* outlives this scope.
++                (void) std::setvbuf( file, nullptr, _IOFBF, 64 * 1024 );
++
+                 TYPE_FILE file_type = TYPE_FILE::PTH_FILE;
+ 
+                 if( span.Pair() == DRILL_LAYER_PAIR( F_Cu, B_Cu ) && !span.m_IsBackdrill )
+@@ -689,6 +697,10 @@ bool EXCELLON_WRITER::writeBackdrillLayerPairFile( const wxString& aPlotDirector
+         aReporter->Report( msg, RPT_SEVERITY_ACTION );
+     }
+ 
++    // Perf (kicad-perf 0022 companion): bigger stdio buffer to collapse
++    // per-hole write() syscalls.
++    (void) std::setvbuf( file, nullptr, _IOFBF, 64 * 1024 );
++
+     try
+     {
+         createDrillFile( file, aSpan, TYPE_FILE::NPTH_FILE, true );
+-- 
+2.39.5
+
