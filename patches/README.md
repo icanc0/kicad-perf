@@ -30,6 +30,7 @@ Each patch is a `git format-patch` output — `git am` or `git apply` clean.
 | 23 | `0023-svg-xmlesc-fast-path.patch`                                                | `SVG_PLOTTER::XmlEsc` iterated char-by-char even when no XML special chars existed (99% of net names, refdes, layer titles). Add `find_first_of` fast-path that returns the original wxString unmodified when nothing needs escaping. | ~5-15 ms per big SVG plot; more with lots of text | trivial |
 | 24 | `0024-extend-stdio-buffer-to-gerber-workfile-and-drill.patch`                    | 0022 buffered PLOTTER::OpenFile. GERBER_PLOTTER swaps in its own temp workFile after that, and EXCELLON_WRITER opens .drl files with wxFopen directly — both bypassed 0022. Add matching `setvbuf` in those spots. | small, cumulative with 0022 | trivial |
 | 25 | `0025-pdf-zlib-level-6.patch`                                                     | PDF stream compression was `wxZ_BEST_COMPRESSION` (zlib level 9) — 5× slower than level 6 for maybe 1-2% smaller output. Drop to `wxZ_DEFAULT_COMPRESSION` (level 6). | **~2-3× faster PDF export**; 5-10% larger .pdf files | low — visible file size delta |
+| 26 | `0026-pdf-zlib-level-6-image-and-3d-streams.patch`                               | 0025 only covered the page-content stream. Three more PDF sites still used level 9 (image XObject, SMask, 3D model attachment). Convert all three. | more of the PDF-export speedup on boards with images / 3D-PDF | low |
 
 ## Expected combined win (theoretical, not yet measured)
 

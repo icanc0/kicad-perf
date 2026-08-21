@@ -1,0 +1,67 @@
+From 29e42531ea511c37636fea1477124173b9ba32f5 Mon Sep 17 00:00:00 2001
+From: icanc0 <ai7@vincentxie.net>
+Date: Fri, 21 Aug 2026 23:10:30 +0000
+Subject: [PATCH] =?UTF-8?q?P26:=20PDF=5FPLOTTER=20=E2=80=94=20level-6=20zl?=
+ =?UTF-8?q?ib=20on=20the=20other=20three=20compression=20sites?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Patch 0025 only got the page-stream compression call. Three more sites
+still used wxZ_BEST_COMPRESSION:
+  - PDF_plotter.cpp:1617 image XObject stream
+  - PDF_plotter.cpp:1660 soft-mask (SMask) stream
+  - PDF_plotter.cpp:3017 3D model attachment stream
+
+Image and 3D-model data is nearly always already-compressed pixels/
+binary — zlib at level 9 gets near-zero extra shrinkage over level 6
+and pays the full ~5× slowdown. Convert all three.
+---
+ common/plotters/PDF_plotter.cpp | 14 +++++++++++---
+ 1 file changed, 11 insertions(+), 3 deletions(-)
+
+diff --git a/common/plotters/PDF_plotter.cpp b/common/plotters/PDF_plotter.cpp
+index 51590997..443110d6 100644
+--- a/common/plotters/PDF_plotter.cpp
++++ b/common/plotters/PDF_plotter.cpp
+@@ -1613,8 +1613,11 @@ void PDF_PLOTTER::endPlotEmitResources()
+         long imgStreamStart = ftell( m_outputFile );
+ 
+         {
++            // Perf (kicad-perf 0025 companion): level 6, not 9. Image
++            // streams are usually already-compressed pixels — zlib gets
++            // near-zero further shrinkage at max level, and pays 5×.
+             wxFFileOutputStream ffos( outputFFile );
+-            wxZlibOutputStream  zos( ffos, wxZ_BEST_COMPRESSION, wxZLIB_ZLIB );
++            wxZlibOutputStream  zos( ffos, wxZ_DEFAULT_COMPRESSION, wxZLIB_ZLIB );
+             wxDataOutputStream  dos( zos );
+ 
+             WriteImageStream( image, dos, m_renderSettings->GetBackgroundColor().ToColour(),
+@@ -1656,8 +1659,9 @@ void PDF_PLOTTER::endPlotEmitResources()
+             long smaskStreamStart = ftell( m_outputFile );
+ 
+             {
++                // Perf (kicad-perf 0025 companion): level 6, not 9.
+                 wxFFileOutputStream ffos( outputFFile );
+-                wxZlibOutputStream  zos( ffos, wxZ_BEST_COMPRESSION, wxZLIB_ZLIB );
++                wxZlibOutputStream  zos( ffos, wxZ_DEFAULT_COMPRESSION, wxZLIB_ZLIB );
+                 wxDataOutputStream  dos( zos );
+ 
+                 WriteImageSMaskStream( image, dos );
+@@ -3013,8 +3017,12 @@ void PDF_PLOTTER::Plot3DModel( const wxString& aSourcePath, const std::vector<PD
+     size_t model_stored_size = 0;
+ 
+     {
++        // Perf (kicad-perf 0025 companion): level 6, not 9. 3D model
++        // files are typically already-compressed binary (glTF binary,
++        // STEP text with repetition — helps some, not enough to warrant
++        // level 9's 5× slowdown).
+         wxFFileOutputStream ffos( outputFFile );
+-        wxZlibOutputStream  zos( ffos, wxZ_BEST_COMPRESSION, wxZLIB_ZLIB );
++        wxZlibOutputStream  zos( ffos, wxZ_DEFAULT_COMPRESSION, wxZLIB_ZLIB );
+ 
+         wxFFileInputStream fileStream( aSourcePath );
+ 
+-- 
+2.39.5
+
