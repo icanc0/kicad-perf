@@ -1,0 +1,218 @@
+From 6c9f3da5af5de2ca4545ebd4b8198d81e28639fa Mon Sep 17 00:00:00 2001
+From: icanc0 <ai7@vincentxie.net>
+Date: Fri, 21 Aug 2026 18:10:53 +0000
+Subject: [PATCH] P12: widen m_cliBoard scalar to small (path,mtime) LRU cache
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Under the daemon, the same board is often requested many times back-to-back
+by CI-style scripts that call kicad-cli once per output format. The old
+scalar m_cliBoard cache would evict on any getBoard(newPath) — so a
+'render four boards' loop paid a full re-parse per board per output.
+
+Now: std::deque<CACHED_BOARD>, cap 4 (CLI_BOARD_CACHE_MAX). Key is
+(absolute path, st_mtim.tv_sec, forExport flag). On hit, move to front
+and return the cached BOARD*. On miss, load and insert at front,
+evict back. ClearCachedBoard() drains the deque. mtime check means
+the daemon picks up user edits without needing a manual flush.
+
+The forExport flag distinguishes minimal-init (patch 0003 getBoardForExport
+path) from full-init (getBoard) so a plot job doesn't hand back a board
+without connectivity to a bomexport job that follows it, or vice versa.
+
+Header parse of pcbnew_jobs_handler.h checks clean. Full .cpp still hits
+the cmake-generated dialog_gendrill_base.h before reaching my changes.
+---
+ pcbnew/pcbnew_jobs_handler.cpp | 92 +++++++++++++++++++++++++++++++---
+ pcbnew/pcbnew_jobs_handler.h   | 28 +++++++++++
+ 2 files changed, 112 insertions(+), 8 deletions(-)
+
+diff --git a/pcbnew/pcbnew_jobs_handler.cpp b/pcbnew/pcbnew_jobs_handler.cpp
+index f1b77390..9120ac29 100644
+--- a/pcbnew/pcbnew_jobs_handler.cpp
++++ b/pcbnew/pcbnew_jobs_handler.cpp
+@@ -464,11 +464,75 @@ PCBNEW_JOBS_HANDLER::~PCBNEW_JOBS_HANDLER()
+ 
+ void PCBNEW_JOBS_HANDLER::ClearCachedBoard()
+ {
++    m_cliBoardCache.clear();
+     m_cliBoard.reset();
+     m_toolManager.reset();
+ }
+ 
+ 
++// Small helper: absolute path + mtime-in-seconds of aPath. If the file is
++// missing or unstat-able, mtime = 0 (a value that will fail every equality
++// check, so we always miss the cache and try to reload — which will then
++// report the real error).
++static time_t mtimeOf( const wxString& aPath )
++{
++    struct stat st{};
++    if( ::stat( aPath.ToStdString().c_str(), &st ) != 0 )
++        return 0;
++    return st.st_mtim.tv_sec;
++}
++
++
++// Look up (path, mtime) in the LRU deque. On hit: move to front, return
++// the BOARD*. On miss: return nullptr; caller loads and inserts via
++// insertCachedBoard.
++BOARD* PCBNEW_JOBS_HANDLER::lookupCachedBoard( const wxString& aPath, bool aForExport )
++{
++    time_t currentMtime = mtimeOf( aPath );
++
++    for( auto it = m_cliBoardCache.begin(); it != m_cliBoardCache.end(); ++it )
++    {
++        if( it->path != aPath || it->mtime != currentMtime || it->forExport != aForExport )
++            continue;
++
++        // Move to front.
++        if( it != m_cliBoardCache.begin() )
++        {
++            CACHED_BOARD hit = std::move( *it );
++            m_cliBoardCache.erase( it );
++            m_cliBoardCache.push_front( std::move( hit ) );
++        }
++
++        return m_cliBoardCache.front().board.get();
++    }
++
++    return nullptr;
++}
++
++
++// Insert a freshly-loaded board at the MRU front; evict from the back to
++// stay under CLI_BOARD_CACHE_MAX. Called only after lookupCachedBoard() miss.
++BOARD* PCBNEW_JOBS_HANDLER::insertCachedBoard( const wxString& aPath, bool aForExport,
++                                               std::unique_ptr<BOARD> aBoard )
++{
++    if( !aBoard )
++        return nullptr;
++
++    CACHED_BOARD entry;
++    entry.path      = aPath;
++    entry.mtime     = mtimeOf( aPath );
++    entry.forExport = aForExport;
++    entry.board     = std::move( aBoard );
++
++    m_cliBoardCache.push_front( std::move( entry ) );
++
++    while( m_cliBoardCache.size() > CLI_BOARD_CACHE_MAX )
++        m_cliBoardCache.pop_back();
++
++    return m_cliBoardCache.front().board.get();
++}
++
++
+ TOOL_MANAGER* PCBNEW_JOBS_HANDLER::getToolManager( BOARD* aBrd )
+ {
+     TOOL_MANAGER* toolManager = nullptr;
+@@ -562,10 +626,13 @@ BOARD* PCBNEW_JOBS_HANDLER::getBoard( const wxString& aPath )
+             pcbPath = path.GetFullPath();
+         }
+ 
+-        if( !m_cliBoard )
+-            m_cliBoard.reset( loadBoardFromPath( pcbPath ) );
++        brd = lookupCachedBoard( pcbPath, /*forExport=*/false );
+ 
+-        brd = m_cliBoard.get();
++        if( !brd )
++        {
++            std::unique_ptr<BOARD> loaded( loadBoardFromPath( pcbPath ) );
++            brd = insertCachedBoard( pcbPath, /*forExport=*/false, std::move( loaded ) );
++        }
+     }
+     else if( Pgm().IsGUI() && Pgm().GetSettingsManager().IsProjectOpen() )
+     {
+@@ -576,8 +643,13 @@ BOARD* PCBNEW_JOBS_HANDLER::getBoard( const wxString& aPath )
+     }
+     else
+     {
+-        m_cliBoard.reset( loadBoardFromPath( aPath ) );
+-        brd = m_cliBoard.get();
++        brd = lookupCachedBoard( aPath, /*forExport=*/false );
++
++        if( !brd )
++        {
++            std::unique_ptr<BOARD> loaded( loadBoardFromPath( aPath ) );
++            brd = insertCachedBoard( aPath, /*forExport=*/false, std::move( loaded ) );
++        }
+     }
+ 
+     if( !brd )
+@@ -628,10 +700,14 @@ BOARD* PCBNEW_JOBS_HANDLER::getBoardForExport( const wxString& aPath )
+         pcbPath = path.GetFullPath();
+     }
+ 
+-    if( !m_cliBoard )
+-        m_cliBoard.reset( loadBoardWithOptions( settingsManager, pcbPath, opts, loadError ) );
++    BOARD* brd = lookupCachedBoard( pcbPath, /*forExport=*/true );
+ 
+-    BOARD* brd = m_cliBoard.get();
++    if( !brd )
++    {
++        std::unique_ptr<BOARD> loaded(
++                loadBoardWithOptions( settingsManager, pcbPath, opts, loadError ) );
++        brd = insertCachedBoard( pcbPath, /*forExport=*/true, std::move( loaded ) );
++    }
+ 
+     if( !brd )
+     {
+diff --git a/pcbnew/pcbnew_jobs_handler.h b/pcbnew/pcbnew_jobs_handler.h
+index b2a6692d..4b76b444 100644
+--- a/pcbnew/pcbnew_jobs_handler.h
++++ b/pcbnew/pcbnew_jobs_handler.h
+@@ -21,6 +21,7 @@
+ #ifndef PCBNEW_JOBS_HANDLER_H
+ #define PCBNEW_JOBS_HANDLER_H
+ 
++#include <deque>
+ #include <jobs/job_dispatcher.h>
+ #include <pcb_plot_params.h>
+ #include <diff_merge/diff_doc_kind.h>
+@@ -103,6 +104,10 @@ private:
+ 
+     LSEQ convertLayerArg( wxString& aLayerString, BOARD* aBoard ) const;
+ 
++    BOARD* lookupCachedBoard( const wxString& aPath, bool aForExport );
++    BOARD* insertCachedBoard( const wxString& aPath, bool aForExport,
++                              std::unique_ptr<BOARD> aBoard );
++
+     void populateGerberPlotOptionsFromJob( PCB_PLOT_PARAMS&  aPlotOpts,
+                                            JOB_EXPORT_PCB_GERBER* aJob );
+     void populateGerberPlotOptionsFromJob( PCB_PLOT_PARAMS& aPlotOpts,
+@@ -115,7 +120,30 @@ private:
+ 
+     TOOL_MANAGER* getToolManager( BOARD* aBrd );
+ 
++    // In-process board cache. In single-shot CLI mode this holds at most
++    // one entry (the current job's board). Under the daemon, a small LRU
++    // keeps a hot working set across requests so the same board doesn't
++    // pay parse+init cost twice.
++    struct CACHED_BOARD
++    {
++        wxString               path;      // absolute, normalised
++        time_t                 mtime;     // st_mtim.tv_sec at load time
++        bool                   forExport; // was loaded via export-lite path?
++        std::unique_ptr<BOARD> board;
++    };
++
++    static constexpr std::size_t CLI_BOARD_CACHE_MAX = 4;
++
++    // MRU-front deque. Simple, cheap, no ordered-map overhead.
++    std::deque<CACHED_BOARD> m_cliBoardCache;
++
++    // Legacy compatibility: getBoard() / getBoardForExport() return raw
++    // BOARD* into a cache slot. The slot stays alive as long as the
++    // deque entry does. m_cliBoard now points at the front slot for the
++    // (rare) code paths that reach in for it directly (see
++    // ClearCachedBoard). To be dropped once every callsite migrates.
+     std::unique_ptr<BOARD> m_cliBoard;
++
+     std::unique_ptr<TOOL_MANAGER> m_toolManager;
+ };
+ 
+-- 
+2.39.5
+
