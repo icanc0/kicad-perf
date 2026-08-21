@@ -53,6 +53,41 @@ off.
 Actual measurements land in `benchmarks/01-after-patch-0003.md` once the
 patch builds.
 
+## Known caveat — zone net-code fixup
+
+`BuildListOfNets()` (`pcbnew/netinfo_list.cpp:185`) internally calls
+`SetAreasNetCodesFromNetNames()` after rebuilding the NETINFO_LIST.
+This is a post-parse fixup that reconciles zone `net_code` fields
+against the current `(net N NAME)` list — necessary if the parser
+wrote zone codes that don't match, e.g. legacy formats or files
+edited by external tools.
+
+For a well-formed KiCad-native `.kicad_pcb` written by the current
+version, this fixup is a no-op — parsed codes are already valid.
+Patch 0003 assumes that. Verified by inspection of the s-expression
+parser (`pcb_io/kicad_sexpr/pcb_parser.cpp`), which reads `net_code`
+verbatim into the zone.
+
+**Failure mode** — if a user hits patch 0003 with a hand-crafted or
+legacy-format `.kicad_pcb` where zone net-codes don't match the
+NETINFO_LIST names, the plotter will:
+
+- Plot the zone fill correctly (fill polys are pre-computed and stored
+  independently of the code).
+- Emit an incorrect net name in Gerber X2 attributes for that zone
+  (if X2 is enabled).
+
+Impact: cosmetic-metadata bug for a small class of inputs. Not a
+correctness bug for the copper geometry.
+
+**Mitigation** — `getBoardForExport()` runs on plot/export paths only.
+If a user notices bad Gerber X2 metadata on legacy files, they can:
+
+- `pcb upgrade` the board once (still full-init path → runs
+  `BuildListOfNets` → writes canonicalised codes back to disk).
+- Or set env var `KICAD_CLI_FULL_INIT=1` (not implemented; would need
+  a small follow-up patch that flips the OPTIONS back to full init).
+
 ## Follow-ups this uncovers
 
 - `ENUM_MAP<PCB_LAYER_ID>` rebuild in step 2 is O(layers²) in the worst
