@@ -1,0 +1,41 @@
+From c79dd780ec4bfe25dd792f708a25afff4f808fcf Mon Sep 17 00:00:00 2001
+From: icanc0 <ai7@vincentxie.net>
+Date: Fri, 21 Aug 2026 15:56:43 +0000
+Subject: [PATCH 2/3] =?UTF-8?q?P2:=20kicad=5Fcli=20=E2=80=94=20defer=20Loa?=
+ =?UTF-8?q?dGlobalTables=20to=20just=20before=20dispatch=20(patch=200002)?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+---
+ kicad/kicad_cli.cpp | 7 ++++++-
+ 1 file changed, 6 insertions(+), 1 deletion(-)
+
+diff --git a/kicad/kicad_cli.cpp b/kicad/kicad_cli.cpp
+index a66a883f..518b3629 100644
+--- a/kicad/kicad_cli.cpp
++++ b/kicad/kicad_cli.cpp
+@@ -526,7 +526,8 @@ bool PGM_KICAD::OnPgmInit()
+     GetSettingsManager().SetKiway( &Kiway );
+     m_bm.Init();
+ 
+-    GetLibraryManager().LoadGlobalTables();
++    // NOTE: LoadGlobalTables() was here; deferred to OnPgmRun() so --version,
++    // --help, and argparse-error paths skip it entirely.
+ 
+     return true;
+ }
+@@ -635,6 +636,10 @@ int PGM_KICAD::OnPgmRun()
+ 
+     if( cliCmd )
+     {
++        // Load global sym/fp/design-block tables lazily. Skips --help,
++        // --version, and argparse-error paths.
++        GetLibraryManager().LoadGlobalTables();
++
+         int exitCode = cliCmd->Perform( Kiway );
+ 
+         if( exitCode != CLI::EXIT_CODES::AVOID_CLOSING )
+-- 
+2.39.5
+

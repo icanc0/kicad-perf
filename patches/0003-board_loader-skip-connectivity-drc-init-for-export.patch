@@ -1,0 +1,364 @@
+From 70bd68fe36c0fd93fc0dbaf597a0a13cde9bfc60 Mon Sep 17 00:00:00 2001
+From: icanc0 <ai7@vincentxie.net>
+Date: Fri, 21 Aug 2026 15:56:43 +0000
+Subject: [PATCH 3/3] =?UTF-8?q?P3:=20board=5Floader=20+=20pcbnew=5Fjobs=5F?=
+ =?UTF-8?q?handler=20=E2=80=94=20skip=20connectivity/DRC/class=20init=20fo?=
+ =?UTF-8?q?r=20plot/export=20jobs=20(patch=200003)?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+---
+ pcbnew/board_loader.cpp        |  42 ++++++----
+ pcbnew/board_loader.h          |  11 +++
+ pcbnew/pcbnew_jobs_handler.cpp | 148 +++++++++++++++++++++++----------
+ pcbnew/pcbnew_jobs_handler.h   |   8 ++
+ 4 files changed, 151 insertions(+), 58 deletions(-)
+
+diff --git a/pcbnew/board_loader.cpp b/pcbnew/board_loader.cpp
+index f40b8b05..76e53154 100644
+--- a/pcbnew/board_loader.cpp
++++ b/pcbnew/board_loader.cpp
+@@ -139,38 +139,52 @@ void BOARD_LOADER::initializeLoadedBoard( BOARD* aBoard, const wxString& aFileNa
+     aBoard->SetProject( aProject );
+ 
+     BOARD_DESIGN_SETTINGS& bds = aBoard->GetDesignSettings();
+-    bds.m_DRCEngine = std::make_shared<DRC_ENGINE>( aBoard, &bds );
+ 
+-    try
++    if( aOptions.init_drc_engine )
+     {
+-        wxFileName rules = aFileName;
+-        rules.SetExt( FILEEXT::DesignRulesFileExtension );
+-        bds.m_DRCEngine->InitEngine( rules );
++        bds.m_DRCEngine = std::make_shared<DRC_ENGINE>( aBoard, &bds );
++
++        try
++        {
++            wxFileName rules = aFileName;
++            rules.SetExt( FILEEXT::DesignRulesFileExtension );
++            bds.m_DRCEngine->InitEngine( rules );
++        }
++        catch( ... )
++        {
++            // Only matters if user tries to run DRC later; will be reported at that time
++        }
+     }
+-    catch( ... )
++
++    if( aOptions.resolve_drc_exclusions )
+     {
+-        // Only matters if user tries to run DRC later; will be reported at that time
++        for( PCB_MARKER* marker : aBoard->ResolveDRCExclusions( true ) )
++            aBoard->Add( marker );
+     }
+ 
+-    for( PCB_MARKER* marker : aBoard->ResolveDRCExclusions( true ) )
+-        aBoard->Add( marker );
++    if( aOptions.build_connectivity )
++        aBoard->BuildConnectivity();
+ 
+-    aBoard->BuildConnectivity();
+-    aBoard->BuildListOfNets();
+-    aBoard->SynchronizeNetsAndNetClasses( true );
++    if( aOptions.build_list_of_nets )
++        aBoard->BuildListOfNets();
++
++    if( aOptions.sync_nets_and_classes )
++        aBoard->SynchronizeNetsAndNetClasses( true );
+ 
+     // Apply component class assignment rules from the project. Without this, conditions like
+     // A.hasComponentClass('Inductor') in custom DRC rules never match because no footprints
+     // have any dynamic component class assigned. The interactive load path does this in
+     // PCB_EDIT_FRAME::OpenProjectFiles; CLI and API consumers go through here.
+-    if( !aBoard->SynchronizeComponentClasses( std::unordered_set<wxString>() )
++    if( aOptions.sync_component_classes
++        && !aBoard->SynchronizeComponentClasses( std::unordered_set<wxString>() )
+         && aOptions.reporter )
+     {
+         aOptions.reporter->Report( _( "Could not load component class assignment rules" ),
+                                    RPT_SEVERITY_WARNING );
+     }
+ 
+-    aBoard->SynchronizeTuningProfileProperties();
++    if( aOptions.sync_tuning_profile )
++        aBoard->SynchronizeTuningProfileProperties();
+ 
+     aBoard->UpdateUserUnits( aBoard, nullptr );
+ }
+diff --git a/pcbnew/board_loader.h b/pcbnew/board_loader.h
+index 11294351..81b10a77 100644
+--- a/pcbnew/board_loader.h
++++ b/pcbnew/board_loader.h
+@@ -56,6 +56,17 @@ public:
+         std::function<void( const wxString&, const wxString& )> drawing_sheet_error_callback;
+ 
+         bool initialize_after_load = true;
++
++        // Fine-grained toggles for the work `initializeLoadedBoard()` does.
++        // All default true so existing callers see no behavior change; plot
++        // / export jobs turn off the ones they don't need.
++        bool init_drc_engine        = true;
++        bool build_connectivity     = true;
++        bool build_list_of_nets     = true;
++        bool sync_nets_and_classes  = true;
++        bool sync_component_classes = true;
++        bool sync_tuning_profile    = true;
++        bool resolve_drc_exclusions = true;
+     };
+ 
+     // Will propagate exceptions (e.g. FUTURE_FORMAT_ERROR, IO_ERROR) from the plugin
+diff --git a/pcbnew/pcbnew_jobs_handler.cpp b/pcbnew/pcbnew_jobs_handler.cpp
+index 35fb1c44..f1b77390 100644
+--- a/pcbnew/pcbnew_jobs_handler.cpp
++++ b/pcbnew/pcbnew_jobs_handler.cpp
+@@ -495,52 +495,59 @@ TOOL_MANAGER* PCBNEW_JOBS_HANDLER::getToolManager( BOARD* aBrd )
+ }
+ 
+ 
+-BOARD* PCBNEW_JOBS_HANDLER::getBoard( const wxString& aPath )
++// Internal implementation shared by getBoard() (full-init) and
++// getBoardForExport() (minimal init for plot / gerber / drill etc.).
++static BOARD* loadBoardWithOptions( SETTINGS_MANAGER& settingsManager,
++                                    const wxString& aBoardPath,
++                                    const BOARD_LOADER::OPTIONS& opts,
++                                    wxString& loadError )
+ {
+-    BOARD*            brd = nullptr;
+-    SETTINGS_MANAGER& settingsManager = Pgm().GetSettingsManager();
+-    wxString loadError;
++    wxFileName pro = aBoardPath;
++    pro.SetExt( FILEEXT::ProjectFileExtension );
++    pro.MakeAbsolute();
++
++    PROJECT* project = settingsManager.GetProject( pro.GetFullPath() );
+ 
+-    auto getProjectForBoard = [&]( const wxString& aBoardPath ) -> PROJECT*
++    if( !project )
+     {
+-        wxFileName pro = aBoardPath;
+-        pro.SetExt( FILEEXT::ProjectFileExtension );
+-        pro.MakeAbsolute();
++        settingsManager.LoadProject( pro.GetFullPath(), true );
++        project = settingsManager.GetProject( pro.GetFullPath() );
++    }
+ 
+-        PROJECT* project = settingsManager.GetProject( pro.GetFullPath() );
++    PCB_IO_MGR::PCB_FILE_T pluginType =
++            PCB_IO_MGR::FindPluginTypeFromBoardPath( aBoardPath, KICTL_KICAD_ONLY );
+ 
+-        if( !project )
+-        {
+-            settingsManager.LoadProject( pro.GetFullPath(), true );
+-            project = settingsManager.GetProject( pro.GetFullPath() );
+-        }
++    if( !project || pluginType == PCB_IO_MGR::FILE_TYPE_NONE )
++        return nullptr;
+ 
+-        return project;
+-    };
+-
+-    auto loadBoardFromPath = [&]( const wxString& aBoardPath ) -> BOARD*
++    try
++    {
++        std::unique_ptr<BOARD> loadedBoard =
++                BOARD_LOADER::Load( aBoardPath, pluginType, project, opts );
++        return loadedBoard.release();
++    }
++    catch( const IO_ERROR& ioe )
+     {
+-        PROJECT* project = getProjectForBoard( aBoardPath );
++        loadError = ioe.What();
++        return nullptr;
++    }
++    catch( ... )
++    {
++        return nullptr;
++    }
++}
+ 
+-        PCB_IO_MGR::PCB_FILE_T pluginType = PCB_IO_MGR::FindPluginTypeFromBoardPath( aBoardPath, KICTL_KICAD_ONLY );
+ 
+-        if( !project || pluginType == PCB_IO_MGR::FILE_TYPE_NONE )
+-            return nullptr;
++BOARD* PCBNEW_JOBS_HANDLER::getBoard( const wxString& aPath )
++{
++    BOARD*            brd = nullptr;
++    SETTINGS_MANAGER& settingsManager = Pgm().GetSettingsManager();
++    wxString loadError;
+ 
+-        try
+-        {
+-            std::unique_ptr<BOARD> loadedBoard = BOARD_LOADER::Load( aBoardPath, pluginType, project );
+-            return loadedBoard.release();
+-        }
+-        catch( const IO_ERROR& ioe )
+-        {
+-            loadError = ioe.What();
+-            return nullptr;
+-        }
+-        catch( ... )
+-        {
+-            return nullptr;
+-        }
++    auto loadBoardFromPath = [&]( const wxString& aBoardPath ) -> BOARD*
++    {
++        return loadBoardWithOptions( settingsManager, aBoardPath, BOARD_LOADER::OPTIONS{},
++                                     loadError );
+     };
+ 
+     if( !Pgm().IsGUI() && Pgm().GetSettingsManager().IsProjectOpen() )
+@@ -587,6 +594,59 @@ BOARD* PCBNEW_JOBS_HANDLER::getBoard( const wxString& aPath )
+ }
+ 
+ 
++BOARD* PCBNEW_JOBS_HANDLER::getBoardForExport( const wxString& aPath )
++{
++    // Fast path: caller knows their job is a read-only geometry pass over
++    // the board (SVG/PDF/PNG/DXF/PS/Gerber/Drill/GenCad/…). Skip the
++    // connectivity graph, DRC engine, component-class sync, and tuning
++    // profile sync — none of which the plotter or exporters consult.
++
++    SETTINGS_MANAGER& settingsManager = Pgm().GetSettingsManager();
++    wxString loadError;
++
++    BOARD_LOADER::OPTIONS opts;
++    opts.init_drc_engine        = false;
++    opts.build_connectivity     = false;
++    opts.build_list_of_nets     = false;
++    opts.sync_nets_and_classes  = false;
++    opts.sync_component_classes = false;
++    opts.sync_tuning_profile    = false;
++    opts.resolve_drc_exclusions = false;
++
++    // The interactive-GUI branch of getBoard() falls back to the editor's
++    // live BOARD*, which already has connectivity built — reuse it there.
++    if( Pgm().IsGUI() )
++        return getBoard( aPath );
++
++    wxString pcbPath = aPath;
++
++    if( pcbPath.IsEmpty() && Pgm().GetSettingsManager().IsProjectOpen() )
++    {
++        wxFileName path = Pgm().GetSettingsManager().Prj().GetProjectFullName();
++        path.SetExt( FILEEXT::KiCadPcbFileExtension );
++        path.MakeAbsolute();
++        pcbPath = path.GetFullPath();
++    }
++
++    if( !m_cliBoard )
++        m_cliBoard.reset( loadBoardWithOptions( settingsManager, pcbPath, opts, loadError ) );
++
++    BOARD* brd = m_cliBoard.get();
++
++    if( !brd )
++    {
++        wxString msg = _( "Failed to load board" );
++
++        if( !loadError.IsEmpty() )
++            msg += wxString::Format( wxS( ": %s" ), loadError );
++
++        m_reporter->Report( msg + '\n', RPT_SEVERITY_ERROR );
++    }
++
++    return brd;
++}
++
++
+ LSEQ PCBNEW_JOBS_HANDLER::convertLayerArg( wxString& aLayerString, BOARD* aBoard ) const
+ {
+     std::map<wxString, LSET> layerUserMasks;
+@@ -1403,7 +1463,7 @@ int PCBNEW_JOBS_HANDLER::JobExportSvg( JOB* aJob )
+     if( aSvgJob == nullptr )
+         return CLI::EXIT_CODES::ERR_UNKNOWN;
+ 
+-    BOARD*        brd = getBoard( aSvgJob->m_filename );
++    BOARD*        brd = getBoardForExport( aSvgJob->m_filename );
+     TOOL_MANAGER* toolManager = getToolManager( brd );
+ 
+     if( !brd )
+@@ -1495,7 +1555,7 @@ int PCBNEW_JOBS_HANDLER::JobExportDxf( JOB* aJob )
+     if( aDxfJob == nullptr )
+         return CLI::EXIT_CODES::ERR_UNKNOWN;
+ 
+-    BOARD* brd = getBoard( aDxfJob->m_filename );
++    BOARD* brd = getBoardForExport( aDxfJob->m_filename );
+ 
+     if( !brd )
+         return CLI::EXIT_CODES::ERR_INVALID_INPUT_FILE;
+@@ -1590,7 +1650,7 @@ int PCBNEW_JOBS_HANDLER::JobExportPdf( JOB* aJob )
+     if( pdfJob == nullptr )
+         return CLI::EXIT_CODES::ERR_UNKNOWN;
+ 
+-    BOARD* brd = getBoard( pdfJob->m_filename );
++    BOARD* brd = getBoardForExport( pdfJob->m_filename );
+ 
+     if( !brd )
+         return CLI::EXIT_CODES::ERR_INVALID_INPUT_FILE;
+@@ -1685,7 +1745,7 @@ int PCBNEW_JOBS_HANDLER::JobExportPng( JOB* aJob )
+     if( pngJob == nullptr )
+         return CLI::EXIT_CODES::ERR_UNKNOWN;
+ 
+-    BOARD* brd = getBoard( pngJob->m_filename );
++    BOARD* brd = getBoardForExport( pngJob->m_filename );
+ 
+     if( !brd )
+         return CLI::EXIT_CODES::ERR_INVALID_INPUT_FILE;
+@@ -1759,7 +1819,7 @@ int PCBNEW_JOBS_HANDLER::JobExportPs( JOB* aJob )
+     if( psJob == nullptr )
+         return CLI::EXIT_CODES::ERR_UNKNOWN;
+ 
+-    BOARD* brd = getBoard( psJob->m_filename );
++    BOARD* brd = getBoardForExport( psJob->m_filename );
+ 
+     if( !brd )
+         return CLI::EXIT_CODES::ERR_INVALID_INPUT_FILE;
+@@ -1855,7 +1915,7 @@ int PCBNEW_JOBS_HANDLER::JobExportGerbers( JOB* aJob )
+     if( aGerberJob == nullptr )
+         return CLI::EXIT_CODES::ERR_UNKNOWN;
+ 
+-    BOARD* brd = getBoard( aGerberJob->m_filename );
++    BOARD* brd = getBoardForExport( aGerberJob->m_filename );
+ 
+     if( !brd )
+         return CLI::EXIT_CODES::ERR_INVALID_INPUT_FILE;
+@@ -2267,7 +2327,7 @@ int PCBNEW_JOBS_HANDLER::JobExportGerber( JOB* aJob )
+     if( aGerberJob == nullptr )
+         return CLI::EXIT_CODES::ERR_UNKNOWN;
+ 
+-    BOARD* brd = getBoard( aGerberJob->m_filename );
++    BOARD* brd = getBoardForExport( aGerberJob->m_filename );
+ 
+     if( !brd )
+         return CLI::EXIT_CODES::ERR_INVALID_INPUT_FILE;
+@@ -2366,7 +2426,7 @@ int PCBNEW_JOBS_HANDLER::JobExportDrill( JOB* aJob )
+     if( aDrillJob == nullptr )
+         return CLI::EXIT_CODES::ERR_UNKNOWN;
+ 
+-    BOARD* brd = getBoard( aDrillJob->m_filename );
++    BOARD* brd = getBoardForExport( aDrillJob->m_filename );
+ 
+     if( !brd )
+         return CLI::EXIT_CODES::ERR_INVALID_INPUT_FILE;
+diff --git a/pcbnew/pcbnew_jobs_handler.h b/pcbnew/pcbnew_jobs_handler.h
+index 03829951..b2a6692d 100644
+--- a/pcbnew/pcbnew_jobs_handler.h
++++ b/pcbnew/pcbnew_jobs_handler.h
+@@ -93,6 +93,14 @@ public:
+ 
+ private:
+     BOARD* getBoard( const wxString& aPath = wxEmptyString );
++
++    // For jobs whose semantics are read-only over board geometry
++    // (svg / pdf / png / gerbers / drill / dxf / ps / gencad / etc.).
++    // Skips DRC engine, connectivity graph, component-class sync, and
++    // tuning profile sync — none of which the plotter or exporters
++    // consult. On a 5.6 MB video demo board this cuts ~2 s of setup.
++    BOARD* getBoardForExport( const wxString& aPath = wxEmptyString );
++
+     LSEQ convertLayerArg( wxString& aLayerString, BOARD* aBoard ) const;
+ 
+     void populateGerberPlotOptionsFromJob( PCB_PLOT_PARAMS&  aPlotOpts,
+-- 
+2.39.5
+
