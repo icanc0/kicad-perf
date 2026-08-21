@@ -1,0 +1,230 @@
+From 3e725d7b6d8cd6cb0e12451e5542b701214b6b09 Mon Sep 17 00:00:00 2001
+From: icanc0 <ai7@vincentxie.net>
+Date: Fri, 21 Aug 2026 17:15:24 +0000
+Subject: [PATCH] =?UTF-8?q?P6:=20singleton=20=E2=80=94=20lazy=20thread-poo?=
+ =?UTF-8?q?l=20creation=20(skip=20~8=20clone()=20per=20invocation)?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Measurement said kicad-cli --version spawns 8 threads via clone() + joins them
+via 45 futex ops. KICAD_SINGLETON::Init() was eagerly constructing a
+BS::priority_thread_pool with N=hardware_concurrency workers on every
+invocation, whether or not any code path submitted a task.
+
+Change:
+  - KICAD_SINGLETON::Init() no longer creates m_ThreadPool.
+  - New KICAD_SINGLETON::EnsureThreadPool() (std::call_once-guarded)
+    constructs it on first use.
+  - PGM_BASE::GetThreadPool() calls EnsureThreadPool() so all existing
+    callers pay only when they need to.
+  - New PGM_BASE::IsThreadPoolInitialized() and IsKiCadThreadPoolInitialized()
+    let shutdown paths skip purge()/wait() when the pool never came up.
+  - kicad_cli.cpp OnPgmExit gates the purge/wait on that.
+
+Zero behavior change for interactive apps (settings loader, library manager,
+GUI painters, etc.) — they submit tasks on real code paths, EnsureThreadPool
+fires there. For CLI --version / --help / trivial exports the pool is never
+touched.
+---
+ common/pgm_base.cpp    |  4 +++-
+ common/singleton.cpp   | 36 +++++++++++++++++++++++++++---------
+ common/thread_pool.cpp | 16 ++++++++++++++++
+ include/pgm_base.h     |  7 +++++++
+ include/singleton.h    | 14 ++++++++++++++
+ include/thread_pool.h  |  9 +++++++++
+ kicad/kicad_cli.cpp    | 12 +++++++++---
+ 7 files changed, 85 insertions(+), 13 deletions(-)
+
+diff --git a/common/pgm_base.cpp b/common/pgm_base.cpp
+index 2bed3ae6..531b47d2 100644
+--- a/common/pgm_base.cpp
++++ b/common/pgm_base.cpp
+@@ -143,7 +143,9 @@ LANGUAGE_DESCR LanguagesList[] =
+ 
+ BS::priority_thread_pool& PGM_BASE::GetThreadPool()
+ {
+-    return *m_singleton.m_ThreadPool;
++    // Lazy: workers spawn on first access, not in KICAD_SINGLETON::Init().
++    // Saves ~8 clone() + join() for kicad-cli invocations that never submit a task.
++    return m_singleton.EnsureThreadPool();
+ }
+ 
+ 
+diff --git a/common/singleton.cpp b/common/singleton.cpp
+index 8c17933b..e95fab55 100644
+--- a/common/singleton.cpp
++++ b/common/singleton.cpp
+@@ -37,6 +37,8 @@ void KICAD_SINGLETON::Shutdown()
+ {
+     // This will wait for all threads to finish and then join them to the main thread.
+     // Must be called before static destruction begins to avoid crashes on macOS.
++    // Note: with lazy init, m_ThreadPool may still be null if no code ever
++    // called GetKiCadThreadPool() / PGM_BASE::GetThreadPool() this invocation.
+     if( m_ThreadPool )
+     {
+         delete m_ThreadPool;
+@@ -57,15 +59,31 @@ void KICAD_SINGLETON::Shutdown()
+ 
+ void KICAD_SINGLETON::Init()
+ {
+-    int num_threads = std::max( 0, ADVANCED_CFG::GetCfg().m_MaximumThreads );
+-
+-    m_ThreadPool = new BS::priority_thread_pool( num_threads,
+-                                                 []
+-                                                 {
+-                                                     // Reduce worker threadpriority to reduce lag in main (UI) thread
+-                                                     BS::this_thread::set_os_thread_priority(
+-                                                             BS::os_thread_priority::below_normal );
+-                                                 } );
++    // Perf: defer thread-pool worker creation to first task submission. Many
++    // kicad-cli invocations (--version, --help, argparse-error paths, and
++    // even simple exports on small boards) never submit tasks — eagerly
++    // spawning hardware_concurrency worker threads costs a clone() + join()
++    // per worker per invocation for nothing. See EnsureThreadPool().
++    m_ThreadPool = nullptr;
+ 
+     m_GLContextManager = new GL_CONTEXT_MANAGER();
+ }
++
++
++BS::priority_thread_pool& KICAD_SINGLETON::EnsureThreadPool()
++{
++    std::call_once( m_threadPoolInitFlag, [this]()
++    {
++        int num_threads = std::max( 0, ADVANCED_CFG::GetCfg().m_MaximumThreads );
++
++        m_ThreadPool = new BS::priority_thread_pool( num_threads,
++                                                     []
++                                                     {
++                                                         // Reduce worker thread priority to reduce lag in main (UI) thread
++                                                         BS::this_thread::set_os_thread_priority(
++                                                                 BS::os_thread_priority::below_normal );
++                                                     } );
++    } );
++
++    return *m_ThreadPool;
++}
+diff --git a/common/thread_pool.cpp b/common/thread_pool.cpp
+index 173228c0..799e83de 100644
+--- a/common/thread_pool.cpp
++++ b/common/thread_pool.cpp
+@@ -58,3 +58,19 @@ void InvalidateKiCadThreadPool()
+     tp = nullptr;
+     tp_owned = false;
+ }
++
++
++bool IsKiCadThreadPoolInitialized()
++{
++    // Cached local? Yes -> already initialized.
++    if( tp )
++        return true;
++
++    // Not cached locally. If PGM_BASE exists, ask its singleton directly —
++    // never call PGM_BASE::GetThreadPool() here, as that would trigger a
++    // lazy init and defeat the whole point of asking.
++    if( PGM_BASE* pgm = PgmOrNull() )
++        return pgm->IsThreadPoolInitialized();
++
++    return false;
++}
+diff --git a/include/pgm_base.h b/include/pgm_base.h
+index 6469542f..89b73513 100644
+--- a/include/pgm_base.h
++++ b/include/pgm_base.h
+@@ -110,6 +110,13 @@ public:
+ 
+     BS::priority_thread_pool& GetThreadPool();
+ 
++    /**
++     * True iff GetThreadPool() has already forced the pool into existence
++     * this process. Non-invasive — does not trigger lazy init. Used by
++     * shutdown code to skip purge()/wait() when no task was ever submitted.
++     */
++    bool IsThreadPoolInitialized() const { return m_singleton.m_ThreadPool != nullptr; }
++
+     GL_CONTEXT_MANAGER* GetGLContextManager() { return m_singleton.m_GLContextManager; }
+ 
+     /**
+diff --git a/include/singleton.h b/include/singleton.h
+index 02c1a6bb..2aceb99c 100644
+--- a/include/singleton.h
++++ b/include/singleton.h
+@@ -21,6 +21,7 @@
+ #define KICAD_SINGLETON_H
+ 
+ #include <cstdint>
++#include <mutex>
+ 
+ class GL_CONTEXT_MANAGER;
+ namespace BS
+@@ -54,9 +55,22 @@ public:
+ 
+     void Init();
+ 
++    /**
++     * Lazy thread-pool accessor. First caller pays the ~8-thread spawn cost.
++     * Subsequent callers get the cached pool.
++     *
++     * Perf: many kicad-cli invocations (--version, --help, argparse-error paths,
++     * simple queries) never submit any tasks. Eagerly spawning N workers in Init()
++     * cost every invocation an ~8-thread clone() + join() cycle for nothing.
++     */
++    BS::priority_thread_pool& EnsureThreadPool();
++
+ public:
+     BS::priority_thread_pool* m_ThreadPool;
+     GL_CONTEXT_MANAGER* m_GLContextManager;
++
++private:
++    std::once_flag m_threadPoolInitFlag;
+ };
+ 
+ 
+diff --git a/include/thread_pool.h b/include/thread_pool.h
+index 470f7c04..58ceb4f6 100644
+--- a/include/thread_pool.h
++++ b/include/thread_pool.h
+@@ -35,6 +35,15 @@ using thread_pool = BS::priority_thread_pool;
+  */
+ APIEXPORT thread_pool& GetKiCadThreadPool();
+ 
++/**
++ * True when the KiCad thread pool has already been created (either by an
++ * explicit GetKiCadThreadPool() call this process, or in scripting mode).
++ * Lets shutdown code skip the purge()/wait() dance for invocations that
++ * never submitted a task — the pool would otherwise be created just to be
++ * torn down.
++ */
++APIEXPORT bool IsKiCadThreadPoolInitialized();
++
+ /**
+  * Invalidate the cached thread pool pointer.
+  *
+diff --git a/kicad/kicad_cli.cpp b/kicad/kicad_cli.cpp
+index cdb091d8..b3016a24 100644
+--- a/kicad/kicad_cli.cpp
++++ b/kicad/kicad_cli.cpp
+@@ -712,9 +712,15 @@ int PGM_KICAD::OnPgmRun()
+ 
+ void PGM_KICAD::OnPgmExit()
+ {
+-    // Abort and wait on any background jobs
+-    GetKiCadThreadPool().purge();
+-    GetKiCadThreadPool().wait();
++    // Abort and wait on any background jobs. With lazy thread-pool init, if
++    // nothing submitted a task this invocation, the pool doesn't exist —
++    // skip the purge()/wait() dance so we don't spawn workers just to tear
++    // them down.
++    if( IsKiCadThreadPoolInitialized() )
++    {
++        GetKiCadThreadPool().purge();
++        GetKiCadThreadPool().wait();
++    }
+ 
+     Kiway.OnKiwayEnd();
+ 
+-- 
+2.39.5
+
