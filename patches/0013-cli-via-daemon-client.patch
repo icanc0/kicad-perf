@@ -1,0 +1,326 @@
+From 8f25d1bceda388aa2910ea3b624a8188ba168114 Mon Sep 17 00:00:00 2001
+From: icanc0 <ai7@vincentxie.net>
+Date: Fri, 21 Aug 2026 18:21:50 +0000
+Subject: [PATCH] P13: --via-daemon client-side auto-connect
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+New CLI::TryRunViaDaemon(argc, argv, exit) in kicad/cli/command_daemon.cpp
+(declared in cli/dispatch.h) checks for either --via-daemon in argv or
+KICAD_CLI_DAEMON=1 in the environment. If asked:
+  - opens the daemon socket ($XDG_RUNTIME_DIR/kicad-cli.sock by default,
+    or --daemon-socket=… override),
+  - sends a request-argv frame with argv stripped of the client-only
+    flags, plus cwd,
+  - streams the daemon's captured stdout and stderr straight through,
+  - returns true with *aExitCode = daemon's exit code.
+
+On any local failure (env var missing, socket not there, connect() ECONN,
+protocol error), returns false so the caller falls through to normal
+in-process dispatch. This gives CI scripts a friction-free path: set
+KICAD_CLI_DAEMON=1 once, invoke kicad-cli as usual, transparently
+benefit when the daemon is up, transparently fall back when it isn't.
+
+PGM_KICAD::OnPgmRun calls TryRunViaDaemon before doing the local
+dispatch. Syntax-checks clean.
+---
+ kicad/cli/command_daemon.cpp | 217 +++++++++++++++++++++++++++++++++++
+ kicad/cli/dispatch.h         |  17 +++
+ kicad/kicad_cli.cpp          |  15 ++-
+ 3 files changed, 246 insertions(+), 3 deletions(-)
+
+diff --git a/kicad/cli/command_daemon.cpp b/kicad/cli/command_daemon.cpp
+index b7a86db8..6667f77a 100644
+--- a/kicad/cli/command_daemon.cpp
++++ b/kicad/cli/command_daemon.cpp
+@@ -520,6 +520,217 @@ static void handleOneClient( int aClientFd )
+     ::close( aClientFd );
+ }
+ 
++
++// ---------------------------------------------------------------------------
++// Client-side dispatch — the caller kicad-cli (running normally, not the
++// daemon) checks whether the user asked for daemon dispatch. If so, we
++// try to connect and forward argv; on any local failure, we return false
++// and the caller falls through to the normal in-process dispatch.
++// ---------------------------------------------------------------------------
++
++static bool wantsViaDaemon( int argc, char** argv, std::string& socketOverride )
++{
++    // Env var: KICAD_CLI_DAEMON=1
++    if( const char* env = std::getenv( "KICAD_CLI_DAEMON" ); env && env[0] && env[0] != '0' )
++        return true;
++
++    for( int i = 1; i < argc; ++i )
++    {
++        std::string arg( argv[i] );
++
++        if( arg == "--via-daemon" )
++            return true;
++
++        if( arg.rfind( "--daemon-socket=", 0 ) == 0 )
++        {
++            socketOverride = arg.substr( std::string( "--daemon-socket=" ).size() );
++            // Still need --via-daemon to actually engage — matches CLI habit
++            // of "-o foo just sets the option, but the mode flag turns it on".
++        }
++    }
++
++    return false;
++}
++
++
++// Copy argv into std::vector<std::string> minus the client-only flags
++// (`--via-daemon`, `--daemon-socket=…`) so the daemon sees the same argv
++// the user typed as if they'd invoked kicad-cli directly.
++static std::vector<std::string> argvForDaemon( int argc, char** argv )
++{
++    std::vector<std::string> out;
++    out.reserve( argc );
++
++    // argv[0] (program name) still goes over — the daemon's dispatcher
++    // reads argv[1..] anyway, so this keeps offsets consistent with the
++    // direct-CLI code path.
++    out.emplace_back( argv[0] );
++
++    for( int i = 1; i < argc; ++i )
++    {
++        std::string arg( argv[i] );
++
++        if( arg == "--via-daemon" )
++            continue;
++
++        if( arg.rfind( "--daemon-socket=", 0 ) == 0 )
++            continue;
++
++        out.emplace_back( std::move( arg ) );
++    }
++
++    return out;
++}
++
++
++static bool sendRequestFromArgv( int aFd, const std::vector<std::string>& aArgv )
++{
++    unsigned char h[8];
++    writeU32BE( h + 0, kReqMagic );
++    writeU32BE( h + 4, static_cast<uint32_t>( aArgv.size() ) );
++
++    if( !sendAll( aFd, h, sizeof( h ) ) )
++        return false;
++
++    for( const std::string& s : aArgv )
++    {
++        unsigned char lb[4];
++        writeU32BE( lb, static_cast<uint32_t>( s.size() ) );
++
++        if( !sendAll( aFd, lb, sizeof( lb ) ) )
++            return false;
++
++        if( !s.empty() && !sendAll( aFd, s.data(), s.size() ) )
++            return false;
++    }
++
++    // cwd
++    char* cwd = ::getcwd( nullptr, 0 );
++    std::string cwdStr( cwd ? cwd : "" );
++    if( cwd )
++        std::free( cwd );
++
++    unsigned char cb[4];
++    writeU32BE( cb, static_cast<uint32_t>( cwdStr.size() ) );
++
++    if( !sendAll( aFd, cb, sizeof( cb ) ) )
++        return false;
++
++    if( !cwdStr.empty() && !sendAll( aFd, cwdStr.data(), cwdStr.size() ) )
++        return false;
++
++    return true;
++}
++
++
++static bool readResponseAndReplay( int aFd, int* aExitCodeOut )
++{
++    unsigned char h[12];
++
++    if( !recvAll( aFd, h, sizeof( h ) ) )
++        return false;
++
++    if( readU32BE( h ) != kRespMagic )
++        return false;
++
++    int      exitCode  = static_cast<int>( readU32BE( h + 4 ) );
++    uint32_t outLen    = readU32BE( h + 8 );
++
++    if( outLen > kMaxFrame )
++        return false;
++
++    if( outLen > 0 )
++    {
++        std::string buf( outLen, '\0' );
++
++        if( !recvAll( aFd, buf.data(), outLen ) )
++            return false;
++
++        std::fwrite( buf.data(), 1, buf.size(), stdout );
++    }
++
++    unsigned char eb[4];
++
++    if( !recvAll( aFd, eb, sizeof( eb ) ) )
++        return false;
++
++    uint32_t errLen = readU32BE( eb );
++
++    if( errLen > kMaxFrame )
++        return false;
++
++    if( errLen > 0 )
++    {
++        std::string buf( errLen, '\0' );
++
++        if( !recvAll( aFd, buf.data(), errLen ) )
++            return false;
++
++        std::fwrite( buf.data(), 1, buf.size(), stderr );
++    }
++
++    *aExitCodeOut = exitCode;
++    return true;
++}
++
++
++static bool tryRunViaDaemonImpl( int argc, char** argv, int* aExitCode )
++{
++    std::string socketOverride;
++
++    if( !wantsViaDaemon( argc, argv, socketOverride ) )
++        return false;
++
++    wxString socketPath = socketOverride.empty() ? defaultSocketPath()
++                                                 : wxString::FromUTF8( socketOverride );
++
++    int fd = ::socket( AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0 );
++
++    if( fd < 0 )
++        return false;
++
++    sockaddr_un addr{};
++    addr.sun_family = AF_UNIX;
++    std::string sp  = socketPath.ToStdString();
++
++    if( sp.size() >= sizeof( addr.sun_path ) )
++    {
++        ::close( fd );
++        return false;
++    }
++
++    std::memcpy( addr.sun_path, sp.c_str(), sp.size() );
++
++    if( ::connect( fd, reinterpret_cast<sockaddr*>( &addr ), sizeof( addr ) ) != 0 )
++    {
++        // Daemon not reachable. Fall through to in-process dispatch — same
++        // behavior as before the flag existed. Graceful fallback is
++        // friendlier for CI where the daemon might just not be up yet.
++        ::close( fd );
++        return false;
++    }
++
++    auto argvVec = argvForDaemon( argc, argv );
++
++    if( !sendRequestFromArgv( fd, argvVec ) )
++    {
++        ::close( fd );
++        return false;
++    }
++
++    ::shutdown( fd, SHUT_WR );
++
++    int localExit = 0;
++    bool ok       = readResponseAndReplay( fd, &localExit );
++    ::close( fd );
++
++    if( !ok )
++        return false;
++
++    *aExitCode = localExit;
++    return true;
++}
++
+ } // namespace
+ 
+ 
+@@ -696,6 +907,12 @@ CLI::DAEMON_STATUS_COMMAND::DAEMON_STATUS_COMMAND() : COMMAND( "status" )
+ }
+ 
+ 
++bool CLI::TryRunViaDaemon( int argc, char** argv, int* aExitCode )
++{
++    return tryRunViaDaemonImpl( argc, argv, aExitCode );
++}
++
++
+ int CLI::DAEMON_STATUS_COMMAND::doPerform( KIWAY& )
+ {
+     wxString socketPath = wxString::FromUTF8( m_argParser.get<std::string>( ARG_SOCKET ) );
+diff --git a/kicad/cli/dispatch.h b/kicad/cli/dispatch.h
+index 75f30283..39ff5968 100644
+--- a/kicad/cli/dispatch.h
++++ b/kicad/cli/dispatch.h
+@@ -40,6 +40,23 @@ namespace CLI
+  */
+ int RunKicadCliDispatch( int argc, char** argv );
+ 
++
++/**
++ * Client-side hook: if the invocation asked for the daemon (via the
++ * `--via-daemon` argv flag or the `KICAD_CLI_DAEMON=1` env var), and a
++ * daemon is reachable at the configured socket, marshal argv+cwd,
++ * stream response, and set *aExitCode to the daemon's return.
++ *
++ * Returns true when the invocation was dispatched via daemon (caller
++ * should exit(*aExitCode) without doing local work). Returns false when
++ * the daemon path was not requested or the socket wasn't reachable — the
++ * caller should fall through to CLI::RunKicadCliDispatch as usual.
++ *
++ * argv is scanned in-place; the `--via-daemon` and any accompanying
++ * `--daemon-socket=…` arg are stripped from the copy sent to the daemon.
++ */
++bool TryRunViaDaemon( int argc, char** argv, int* aExitCode );
++
+ } // namespace CLI
+ 
+ #endif // CLI_DISPATCH_H
+diff --git a/kicad/kicad_cli.cpp b/kicad/kicad_cli.cpp
+index 79fb6942..51dd9682 100644
+--- a/kicad/kicad_cli.cpp
++++ b/kicad/kicad_cli.cpp
+@@ -732,11 +732,20 @@ int CLI::RunKicadCliDispatch( int argc, char** argv )
+ 
+ int PGM_KICAD::OnPgmRun()
+ {
++    // Client-side daemon short-circuit — if --via-daemon (or
++    // KICAD_CLI_DAEMON=1) is in effect and the daemon is reachable at
++    // the configured socket, marshal argv+cwd, print streamed output,
++    // and exit with the daemon's status. Silent fallback to in-process
++    // dispatch on any local failure.
++    {
++        int daemonExit = 0;
++
++        if( CLI::TryRunViaDaemon( m_argcUtf8, m_argvUtf8, &daemonExit ) )
++            return daemonExit;
++    }
++
+     int exitCode = CLI::RunKicadCliDispatch( m_argcUtf8, m_argvUtf8 );
+ 
+-    // Preserve legacy fall-through: if RunKicadCliDispatch fell into the
+-    // "no command matched" branch it already printed help and returned
+-    // ERR_ARGS. Nothing else to do here.
+     return exitCode;
+ }
+ 
+-- 
+2.39.5
+
