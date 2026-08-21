@@ -1,0 +1,55 @@
+From 5d90ef8b4d208357518bf44db51345b087e6a8f4 Mon Sep 17 00:00:00 2001
+From: icanc0 <ai7@vincentxie.net>
+Date: Fri, 21 Aug 2026 22:03:22 +0000
+Subject: [PATCH] P23: SVG_PLOTTER::XmlEsc fast-path for strings without any
+ XML specials
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+XmlEsc iterated char-by-char with a switch even for strings that had
+no special characters — which is the overwhelming majority of SVG text
+in a board (net names, refdes, layer titles, drill sizes). Every hit
+allocated + populated a new wxString.
+
+Fast-path: single wxString::find_first_of pass over the trigger set;
+if no match, return the original string unmodified. When the string
+does contain a special, fall through to the existing per-char loop
+(unchanged).
+
+Correctness: the trigger set exactly mirrors the switch branches, so
+the fast-path is only taken when the loop would have been a no-op.
+---
+ common/plotters/SVG_plotter.cpp | 16 ++++++++++++++++
+ 1 file changed, 16 insertions(+)
+
+diff --git a/common/plotters/SVG_plotter.cpp b/common/plotters/SVG_plotter.cpp
+index 2a2f4ad6..cca4ce4e 100644
+--- a/common/plotters/SVG_plotter.cpp
++++ b/common/plotters/SVG_plotter.cpp
+@@ -108,6 +108,22 @@
+  */
+ static wxString XmlEsc( const wxString& aStr, bool isAttribute = false )
+ {
++    // Perf: the overwhelming majority of SVG text (net names, ref des,
++    // layer titles) is plain ASCII with none of these characters. Scan
++    // once for any special char; if none, return the original string
++    // unmodified — avoids the per-character loop, the reserve, and the
++    // wxString append churn for the common case.
++    //
++    // The trigger set matches the branches below: always <, >, &, \r;
++    // and additionally " \t \n when isAttribute.
++    const wxString basicSpecials = wxS( "<>&\r" );
++
++    if( aStr.find_first_of( basicSpecials ) == wxString::npos
++        && ( !isAttribute || aStr.find_first_of( wxS( "\"\t\n" ) ) == wxString::npos ) )
++    {
++        return aStr;
++    }
++
+     wxString    escaped;
+ 
+     escaped.reserve( aStr.length() );
+-- 
+2.39.5
+
