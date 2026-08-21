@@ -1,0 +1,57 @@
+From 19a55e177deb9a1b9bce11e5f0aae6cebf05749f Mon Sep 17 00:00:00 2001
+From: icanc0 <ai7@vincentxie.net>
+Date: Fri, 21 Aug 2026 20:30:47 +0000
+Subject: [PATCH] =?UTF-8?q?P18:=20daemon=20=E2=80=94=20respond=20with=20er?=
+ =?UTF-8?q?ror=20frame=20if=20client=20cwd=20is=20unreachable?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Bug found by sweeping patch 0010: handleOneClient silently ignored
+chdir() failures. If the client's cwd was deleted or has no exec perm,
+the dispatcher ran from the daemon's cwd; the user got a mysterious
+'board file does not exist' instead of a real diagnostic.
+
+Fix: send an ERR_UNKNOWN response frame with a specific error message
+whenever ::chdir fails, and skip the dispatch. prevCwd is still freed
+before returning.
+---
+ kicad/cli/command_daemon.cpp | 20 +++++++++++++++++---
+ 1 file changed, 17 insertions(+), 3 deletions(-)
+
+diff --git a/kicad/cli/command_daemon.cpp b/kicad/cli/command_daemon.cpp
+index fbb39011..b1e95fef 100644
+--- a/kicad/cli/command_daemon.cpp
++++ b/kicad/cli/command_daemon.cpp
+@@ -512,11 +512,25 @@ static void handleOneClient( int aClientFd )
+         argvC.push_back( s.data() );
+ 
+     // Change to the client's cwd so relative paths (input .kicad_pcb,
+-    // -o output/) resolve where the caller expected.
++    // -o output/) resolve where the caller expected. If the client's cwd
++    // is inaccessible (deleted, no perm), respond with a clear error
++    // instead of silently running from the daemon's cwd — the alternative
++    // was a confusing "board file does not exist" from the dispatcher.
+     char* prevCwd = ::getcwd( nullptr, 0 );
+ 
+-    if( !req.cwd.empty() )
+-        (void) ::chdir( req.cwd.c_str() );
++    if( !req.cwd.empty() && ::chdir( req.cwd.c_str() ) != 0 )
++    {
++        std::string err = "daemon: cannot chdir to client cwd '";
++        err += req.cwd;
++        err += "': ";
++        err += ::strerror( errno );
++        err += '\n';
++
++        writeResponse( aClientFd, CLI::EXIT_CODES::ERR_UNKNOWN, /*stdout=*/{}, err );
++        std::free( prevCwd );
++        ::close( aClientFd );
++        return;
++    }
+ 
+     // Snapshot process-global mutable state that CLI commands might set
+     // and forget to restore. Destructor at scope exit puts it back so the
+-- 
+2.39.5
+

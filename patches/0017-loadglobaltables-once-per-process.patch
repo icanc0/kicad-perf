@@ -1,0 +1,57 @@
+From e728e6e66e1f99a923838cdcaf53d274f9e2b7de Mon Sep 17 00:00:00 2001
+From: icanc0 <ai7@vincentxie.net>
+Date: Fri, 21 Aug 2026 20:29:59 +0000
+Subject: [PATCH] P17: guard LoadGlobalTables with std::call_once (fix
+ regression under daemon)
+
+Bug found by sweeping patch 0002 for edge cases: with the LoadGlobalTables
+call moved into RunKicadCliDispatch, the daemon (patch 0010) re-parses
+sym-lib-table / fp-lib-table / PCM dir scan on every request.
+
+Guard with std::once_flag so the load runs exactly once per process.
+Single-shot CLI: same as before. Daemon: saves ~30-100 ms per request
+(the exact amount patch 0002 saves in single-shot).
+
+Trade-off: user's tables changing on disk during a daemon session
+requires 'kicad-cli daemon stop' + start. Acceptable given daemon is
+opt-in and users know they're pinning state.
+---
+ kicad/kicad_cli.cpp | 15 ++++++++++++---
+ 1 file changed, 12 insertions(+), 3 deletions(-)
+
+diff --git a/kicad/kicad_cli.cpp b/kicad/kicad_cli.cpp
+index 51dd9682..e5bca39c 100644
+--- a/kicad/kicad_cli.cpp
++++ b/kicad/kicad_cli.cpp
+@@ -34,6 +34,7 @@
+ #include <trace_helpers.h>
+ 
+ #include <cctype>
++#include <mutex>
+ #include <set>
+ #include <cstdlib>
+ 
+@@ -706,9 +707,17 @@ int CLI::RunKicadCliDispatch( int argc, char** argv )
+ 
+     if( cliCmd )
+     {
+-        // Load global sym/fp/design-block tables lazily. Skips --help,
+-        // --version, and argparse-error paths.
+-        Pgm().GetLibraryManager().LoadGlobalTables();
++        // Load global sym/fp/design-block tables lazily on first use. Skips
++        // --help, --version, and argparse-error paths. Guarded by
++        // std::once_flag so daemon-mode (kicad-perf patches 0007+) doesn't
++        // re-parse the sym-lib-table / fp-lib-table / PCM dir scan on every
++        // request. The user's tables changing on disk mid-daemon-session
++        // means they need to restart the daemon; acceptable trade-off vs
++        // the ~30-100 ms saved per request.
++        static std::once_flag s_libTablesLoaded;
++
++        std::call_once( s_libTablesLoaded,
++                        []() { Pgm().GetLibraryManager().LoadGlobalTables(); } );
+ 
+         int exitCode = cliCmd->Perform( Kiway );
+ 
+-- 
+2.39.5
+
