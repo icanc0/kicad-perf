@@ -1,0 +1,100 @@
+From b5219abac84be55b82dbb29a789887721cb4b540 Mon Sep 17 00:00:00 2001
+From: icanc0 <ai7@vincentxie.net>
+Date: Fri, 21 Aug 2026 18:44:41 +0000
+Subject: [PATCH] =?UTF-8?q?P14:=20board=5Floader=20=E2=80=94=20skip=20DS?=
+ =?UTF-8?q?=5FDATA=5FMODEL::LoadDrawingSheet=20reload=20if=20unchanged?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Small in-function static (path, mtime) tracker inside initializeLoadedBoard().
+The DS_DATA_MODEL singleton already holds the current sheet — if the same
+(filename, mtime) hits twice back-to-back we don't need to re-parse; the
+singleton's state is still what the plot code will read.
+
+Direct kicad-cli: no measurable change (single load per invocation).
+Daemon (patches 0007+): most CI workflows keep the same drawing sheet
+across all boards in the project, so a 4-board batch drops from 4 parses
+to 1.
+
+On any parse failure, cache stays cleared so the next call retries.
+---
+ pcbnew/board_loader.cpp | 53 +++++++++++++++++++++++++++++++++++++----
+ 1 file changed, 49 insertions(+), 4 deletions(-)
+
+diff --git a/pcbnew/board_loader.cpp b/pcbnew/board_loader.cpp
+index 76e53154..e8bcb890 100644
+--- a/pcbnew/board_loader.cpp
++++ b/pcbnew/board_loader.cpp
+@@ -34,6 +34,7 @@
+ #include <properties/property.h>
+ #include <reporter.h>
+ #include <wildcards_and_files_ext.h>
++#include <sys/stat.h>
+ #include <unordered_set>
+ #include <wx/image.h>
+ #include <wx/log.h>
+@@ -117,12 +118,56 @@ void BOARD_LOADER::initializeLoadedBoard( BOARD* aBoard, const wxString& aFileNa
+                                               aProject->GetProjectPath(),
+                                               { aBoard->GetEmbeddedFiles() } );
+ 
+-    wxString msg;
++    // Perf: DS_DATA_MODEL is a singleton mutated in place by LoadDrawingSheet.
++    // In direct-CLI mode this runs once per invocation (~1-5 ms parse of the
++    // default sheet). In daemon mode (kicad-perf patches 0007+), multiple
++    // back-to-back board loads for the same project all hit the same sheet
++    // file. Track the last-loaded (path, mtime) and short-circuit.
++    static wxString  s_lastDrawingSheetPath;
++    static time_t    s_lastDrawingSheetMTime = 0;
+ 
+-    if( !DS_DATA_MODEL::GetTheInstance().LoadDrawingSheet( filename, &msg ) )
++    bool skipReload = false;
++
++    if( !filename.IsEmpty() && filename == s_lastDrawingSheetPath )
++    {
++        struct stat st{};
++
++        if( ::stat( filename.ToStdString().c_str(), &st ) == 0
++            && st.st_mtim.tv_sec == s_lastDrawingSheetMTime )
++        {
++            skipReload = true;
++        }
++    }
++
++    if( !skipReload )
+     {
+-        if( aOptions.drawing_sheet_error_callback )
+-            aOptions.drawing_sheet_error_callback( BASE_SCREEN::m_DrawingSheetFileName, msg );
++        wxString msg;
++
++        if( !DS_DATA_MODEL::GetTheInstance().LoadDrawingSheet( filename, &msg ) )
++        {
++            if( aOptions.drawing_sheet_error_callback )
++                aOptions.drawing_sheet_error_callback( BASE_SCREEN::m_DrawingSheetFileName, msg );
++
++            // Failed load: don't cache — retry next time in case the user
++            // fixes it. Wipe the path so a subsequent successful load
++            // clears the state and repopulates cleanly.
++            s_lastDrawingSheetPath.clear();
++            s_lastDrawingSheetMTime = 0;
++        }
++        else
++        {
++            s_lastDrawingSheetPath = filename;
++
++            if( struct stat st{}; !filename.IsEmpty()
++                && ::stat( filename.ToStdString().c_str(), &st ) == 0 )
++            {
++                s_lastDrawingSheetMTime = st.st_mtim.tv_sec;
++            }
++            else
++            {
++                s_lastDrawingSheetMTime = 0;
++            }
++        }
+     }
+ 
+     ENUM_MAP<PCB_LAYER_ID>& layerEnum = ENUM_MAP<PCB_LAYER_ID>::Instance();
+-- 
+2.39.5
+
