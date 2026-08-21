@@ -1,0 +1,80 @@
+From 51b9c6ec0469ff9ee1ce1a0e2f24b3e9f9b11d04 Mon Sep 17 00:00:00 2001
+From: icanc0 <ai7@vincentxie.net>
+Date: Fri, 21 Aug 2026 20:53:30 +0000
+Subject: [PATCH] =?UTF-8?q?P19:=20daemon=20=E2=80=94=20cap=20total=20reque?=
+ =?UTF-8?q?st-frame=20allocation=20to=20prevent=20memory=20bomb?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Sweeping patch 0009 wire protocol: the per-arg cap was 4 MB (kMaxFrame)
+and argc cap was 4096. A malicious local peer with permission to
+connect (same-user only via 0600 socket, but still) could send 4096
+args of 4 MB each = 16 GB allocation.
+
+Tighten to (a) per-arg cap 1 MB (well above Linux MAX_ARG_STRLEN of
+128 KB) and (b) cumulative-bytes cap of kMaxFrame across all args
+plus cwd. Any single request now allocates ≤ 4 MB. Framing-error
+close as before.
+---
+ kicad/cli/command_daemon.cpp | 21 ++++++++++++++++++++-
+ 1 file changed, 20 insertions(+), 1 deletion(-)
+
+diff --git a/kicad/cli/command_daemon.cpp b/kicad/cli/command_daemon.cpp
+index b1e95fef..29c21227 100644
+--- a/kicad/cli/command_daemon.cpp
++++ b/kicad/cli/command_daemon.cpp
+@@ -286,8 +286,15 @@ struct ParsedRequest
+ 
+ 
+ // Parse one request frame from the client. Returns false on framing error.
++//
++// Defensive limits: (1) per-arg cap of 1 MB (well over any realistic argv
++// string on Linux — MAX_ARG_STRLEN is 128 KB), (2) total-frame cap that
++// bounds cumulative allocation to kMaxFrame (4 MB). Prevents a peer from
++// asking us to allocate 4096 * 4 MB = 16 GB via the per-arg limit alone.
+ static bool readRequest( int aFd, ParsedRequest& aOut )
+ {
++    constexpr uint32_t kMaxArgSingle = 1u * 1024u * 1024u; // 1 MB per arg
++
+     unsigned char header[8];
+ 
+     if( !recvAll( aFd, header, sizeof( header ) ) )
+@@ -303,6 +310,8 @@ static bool readRequest( int aFd, ParsedRequest& aOut )
+ 
+     aOut.argv.reserve( argc );
+ 
++    size_t cumulative = 0;
++
+     for( uint32_t i = 0; i < argc; ++i )
+     {
+         unsigned char lenBuf[4];
+@@ -312,7 +321,12 @@ static bool readRequest( int aFd, ParsedRequest& aOut )
+ 
+         uint32_t len = readU32BE( lenBuf );
+ 
+-        if( len > kMaxFrame )
++        if( len > kMaxArgSingle )
++            return false;
++
++        cumulative += len;
++
++        if( cumulative > kMaxFrame )
+             return false;
+ 
+         std::string arg( len, '\0' );
+@@ -333,6 +347,11 @@ static bool readRequest( int aFd, ParsedRequest& aOut )
+     if( cwdLen > 4096 )
+         return false;
+ 
++    cumulative += cwdLen;
++
++    if( cumulative > kMaxFrame )
++        return false;
++
+     aOut.cwd.resize( cwdLen );
+ 
+     if( cwdLen > 0 && !recvAll( aFd, aOut.cwd.data(), cwdLen ) )
+-- 
+2.39.5
+
