@@ -1,0 +1,70 @@
+From ada8da2faedff0c2e9f5f07d76544e410a986be7 Mon Sep 17 00:00:00 2001
+From: icanc0 <ai7@vincentxie.net>
+Date: Fri, 21 Aug 2026 21:17:01 +0000
+Subject: [PATCH] =?UTF-8?q?P21:=20daemon=20start=20=E2=80=94=20check=20pid?=
+ =?UTF-8?q?file=20before=20bind=20(don't=20clobber=20running=20daemon's=20?=
+ =?UTF-8?q?socket)?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Sweeping patch 0008: DAEMON_START_COMMAND::doPerform called bindListen
+BEFORE checking the pidfile. bindListenUnixSocket() unlinks any
+existing socket file at the target path to remove stale sockets. Under
+a race where two 'daemon start' invocations run against a running
+daemon, the second one would unlink the RUNNING daemon's socket file
+just to then detect the pid collision and refuse to proceed — leaving
+the original daemon alive but unreachable.
+
+Reorder: pidfile check first, then bind. Doesn't fix the fully-
+concurrent case (needs flock on the pidfile), but eliminates the
+common 'user runs daemon start twice by accident' footgun.
+---
+ kicad/cli/command_daemon.cpp | 24 ++++++++++++++----------
+ 1 file changed, 14 insertions(+), 10 deletions(-)
+
+diff --git a/kicad/cli/command_daemon.cpp b/kicad/cli/command_daemon.cpp
+index 76dae3c4..93f98410 100644
+--- a/kicad/cli/command_daemon.cpp
++++ b/kicad/cli/command_daemon.cpp
+@@ -884,15 +884,11 @@ int CLI::DAEMON_START_COMMAND::doPerform( KIWAY& )
+         }
+     }
+ 
+-    wxString err;
+-    int      listenFd = bindListenUnixSocket( socketPath, err );
+-
+-    if( listenFd < 0 )
+-    {
+-        wxFprintf( stderr, _( "daemon start: %s\n" ), err );
+-        return EXIT_CODES::ERR_UNKNOWN;
+-    }
+-
++    // Check pidfile BEFORE binding. bindListenUnixSocket() unlinks any
++    // existing socket file at the target path, so if we did the pidfile
++    // check second, a racing 'daemon start' against a running daemon
++    // would destroy the running daemon's socket even though it correctly
++    // detects the collision and refuses to proceed.
+     wxString pidfilePath = pidfilePathFor( socketPath );
+ 
+     if( int alive = readLivePid( pidfilePath ); alive > 0 )
+@@ -901,7 +897,15 @@ int CLI::DAEMON_START_COMMAND::doPerform( KIWAY& )
+                    _( "daemon start: another daemon (pid %d) is already running at %s.\n"
+                       "Run 'kicad-cli daemon stop' first, or remove %s if you are sure it is stale.\n" ),
+                    alive, socketPath, pidfilePath );
+-        ::close( listenFd );
++        return EXIT_CODES::ERR_UNKNOWN;
++    }
++
++    wxString err;
++    int      listenFd = bindListenUnixSocket( socketPath, err );
++
++    if( listenFd < 0 )
++    {
++        wxFprintf( stderr, _( "daemon start: %s\n" ), err );
+         return EXIT_CODES::ERR_UNKNOWN;
+     }
+ 
+-- 
+2.39.5
+

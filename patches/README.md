@@ -25,6 +25,7 @@ Each patch is a `git format-patch` output — `git am` or `git apply` clean.
 | 18 | `0018-daemon-error-on-chdir-fail.patch`                                         | `handleOneClient` was silently ignoring `chdir()` errors. Now the client gets a specific error frame ("cannot chdir to client cwd '/path': No such file or directory") instead of a mysterious "board file does not exist" from the dispatcher. | robustness | trivial |
 | 19 | `0019-daemon-cap-request-alloc.patch`                                           | wire-protocol reader was capped per-arg (4 MB) but not cumulatively — a peer could ask for 4096 args × 4 MB = 16 GB alloc. New per-arg cap 1 MB and cumulative-request cap `kMaxFrame` (4 MB). | security / DoS hardening | trivial |
 | 20 | `0020-daemon-pid-reuse-defence.patch`                                           | `readLivePid` used only `kill(pid, 0)` — succeeds for ANY live same-user process, so a recycled PID would make `daemon stop` SIGTERM an unrelated process. Add a `/proc/<pid>/comm` prefix check for `kicad-cli`. | security | trivial |
+| 21 | `0021-daemon-check-pidfile-before-bind.patch`                                   | `daemon start` was calling `bindListen` before the pidfile check. `bindListen` unlinks any existing socket first, so an accidental double-start would silently destroy the running daemon's socket file (clients then get ECONNREFUSED, running daemon still alive but unreachable). Reorder: pidfile check → bind. | robustness | trivial |
 
 ## Expected combined win (theoretical, not yet measured)
 
