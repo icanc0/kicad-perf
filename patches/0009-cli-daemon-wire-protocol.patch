@@ -1,0 +1,266 @@
+From cb5114f56192a046c6c6b5ac4e26abbd4b5260df Mon Sep 17 00:00:00 2001
+From: icanc0 <ai7@vincentxie.net>
+Date: Fri, 21 Aug 2026 17:47:17 +0000
+Subject: [PATCH] P9: daemon request+response wire protocol
+
+Fills handleOneClient with real length-prefixed binary framing (KCLI/STAT
+magic + argc + args + cwd; response has exit_code + stdout + stderr).
+Validated end-to-end with a standalone C impl of handleOneClient + a
+Python client (kicad-perf scratch/): argv[0..6] and cwd round-trip
+cleanly. Dispatch through commandStack lands in patch 0010.
+---
+ kicad/cli/command_daemon.cpp | 228 ++++++++++++++++++++++++++++++++---
+ 1 file changed, 214 insertions(+), 14 deletions(-)
+
+diff --git a/kicad/cli/command_daemon.cpp b/kicad/cli/command_daemon.cpp
+index f9a72165..b7a4a3b7 100644
+--- a/kicad/cli/command_daemon.cpp
++++ b/kicad/cli/command_daemon.cpp
+@@ -132,30 +132,230 @@ static int bindListenUnixSocket( const wxString& aPath, wxString& aError )
+ }
+ 
+ 
+-// Placeholder: read the request-argv frame from the client and print it.
+-// Real dispatch (parse JSON → argv, run through commandStack, stream
+-// stdout/stderr) is in the follow-up patch.
+-static void handleOneClient( int aClientFd )
++// ---------------------------------------------------------------------------
++// Wire protocol — simple length-prefixed argv frame. Deliberately does not
++// use JSON / protobuf so the daemon avoids pulling in another parser at
++// startup. See analysis/02-daemon-mode-design.md for the design.
++//
++// Request (client -> server):
++//   uint32_be   magic     = 0x4B434C49  ("KCLI")
++//   uint32_be   argc
++//   for i in [0, argc):
++//     uint32_be  len_i
++//     bytes      argv_i     (no NUL required)
++//   uint32_be   cwd_len
++//   bytes       cwd
++//
++// Response (server -> client):
++//   uint32_be   status_marker  = 0x53544154  ("STAT")
++//   uint32_be   exit_code
++//   uint32_be   stdout_len
++//   bytes       stdout_capture
++//   uint32_be   stderr_len
++//   bytes       stderr_capture
++// ---------------------------------------------------------------------------
++
++static constexpr uint32_t kReqMagic  = 0x4B434C49u;
++static constexpr uint32_t kRespMagic = 0x53544154u;
++static constexpr size_t   kMaxFrame  = 4u * 1024u * 1024u; // 4 MB request cap
++
++// Read exactly N bytes from fd, or return false if the peer closed / errored.
++static bool recvAll( int aFd, void* aBuf, size_t aLen )
++{
++    char* p = static_cast<char*>( aBuf );
++    size_t got = 0;
++
++    while( got < aLen )
++    {
++        ssize_t n = ::recv( aFd, p + got, aLen - got, 0 );
++
++        if( n == 0 )
++            return false;
++
++        if( n < 0 )
++        {
++            if( errno == EINTR )
++                continue;
++            return false;
++        }
++
++        got += static_cast<size_t>( n );
++    }
++
++    return true;
++}
++
++
++static bool sendAll( int aFd, const void* aBuf, size_t aLen )
++{
++    const char* p = static_cast<const char*>( aBuf );
++    size_t sent = 0;
++
++    while( sent < aLen )
++    {
++        ssize_t n = ::send( aFd, p + sent, aLen - sent, MSG_NOSIGNAL );
++
++        if( n < 0 )
++        {
++            if( errno == EINTR )
++                continue;
++            return false;
++        }
++
++        sent += static_cast<size_t>( n );
++    }
++
++    return true;
++}
++
++
++static uint32_t readU32BE( const unsigned char* p )
++{
++    return ( uint32_t( p[0] ) << 24 ) | ( uint32_t( p[1] ) << 16 )
++           | ( uint32_t( p[2] ) << 8 ) | uint32_t( p[3] );
++}
++
++
++static void writeU32BE( unsigned char* p, uint32_t v )
++{
++    p[0] = static_cast<unsigned char>( ( v >> 24 ) & 0xff );
++    p[1] = static_cast<unsigned char>( ( v >> 16 ) & 0xff );
++    p[2] = static_cast<unsigned char>( ( v >> 8 ) & 0xff );
++    p[3] = static_cast<unsigned char>( v & 0xff );
++}
++
++
++struct ParsedRequest
++{
++    std::vector<std::string> argv;
++    std::string              cwd;
++};
++
++
++// Parse one request frame from the client. Returns false on framing error.
++static bool readRequest( int aFd, ParsedRequest& aOut )
+ {
+-    constexpr size_t kMaxRequest = 64 * 1024;
+-    std::vector<char> buf( kMaxRequest );
++    unsigned char header[8];
++
++    if( !recvAll( aFd, header, sizeof( header ) ) )
++        return false;
++
++    if( readU32BE( header ) != kReqMagic )
++        return false;
++
++    uint32_t argc = readU32BE( header + 4 );
++
++    if( argc > 4096 )
++        return false;
+ 
+-    ssize_t n = ::recv( aClientFd, buf.data(), buf.size() - 1, 0 );
++    aOut.argv.reserve( argc );
+ 
+-    if( n <= 0 )
++    for( uint32_t i = 0; i < argc; ++i )
++    {
++        unsigned char lenBuf[4];
++
++        if( !recvAll( aFd, lenBuf, sizeof( lenBuf ) ) )
++            return false;
++
++        uint32_t len = readU32BE( lenBuf );
++
++        if( len > kMaxFrame )
++            return false;
++
++        std::string arg( len, '\0' );
++
++        if( len > 0 && !recvAll( aFd, arg.data(), len ) )
++            return false;
++
++        aOut.argv.emplace_back( std::move( arg ) );
++    }
++
++    unsigned char cwdLenBuf[4];
++
++    if( !recvAll( aFd, cwdLenBuf, sizeof( cwdLenBuf ) ) )
++        return false;
++
++    uint32_t cwdLen = readU32BE( cwdLenBuf );
++
++    if( cwdLen > 4096 )
++        return false;
++
++    aOut.cwd.resize( cwdLen );
++
++    if( cwdLen > 0 && !recvAll( aFd, aOut.cwd.data(), cwdLen ) )
++        return false;
++
++    return true;
++}
++
++
++static bool writeResponse( int aFd, int aExitCode, const std::string& aStdout,
++                           const std::string& aStderr )
++{
++    unsigned char header[16];
++    writeU32BE( header + 0,  kRespMagic );
++    writeU32BE( header + 4,  static_cast<uint32_t>( aExitCode ) );
++    writeU32BE( header + 8,  static_cast<uint32_t>( aStdout.size() ) );
++    writeU32BE( header + 12, 0 ); // placeholder, rewritten below
++
++    // We send header (16 bytes) then stdout then stderr_len then stderr.
++    // Reshape: header0 (magic + exit + stdout_len), stdout bytes,
++    //          header1 (stderr_len), stderr bytes.
++    unsigned char hdr0[12];
++    std::memcpy( hdr0, header, 12 );
++
++    if( !sendAll( aFd, hdr0, sizeof( hdr0 ) ) )
++        return false;
++
++    if( !aStdout.empty() && !sendAll( aFd, aStdout.data(), aStdout.size() ) )
++        return false;
++
++    unsigned char hdr1[4];
++    writeU32BE( hdr1, static_cast<uint32_t>( aStderr.size() ) );
++
++    if( !sendAll( aFd, hdr1, sizeof( hdr1 ) ) )
++        return false;
++
++    if( !aStderr.empty() && !sendAll( aFd, aStderr.data(), aStderr.size() ) )
++        return false;
++
++    return true;
++}
++
++
++// Per-client dispatch — reads one request frame, dispatches, writes response.
++// Actual command dispatch through commandStack lands in the *next* patch;
++// this one exercises framing end-to-end so the wire protocol can be
++// integration-tested from a Python client before we wire in the real
++// CLI runtime.
++static void handleOneClient( int aClientFd )
++{
++    ParsedRequest req;
++
++    if( !readRequest( aClientFd, req ) )
+     {
+         ::close( aClientFd );
+         return;
+     }
+ 
+-    buf[static_cast<size_t>( n )] = '\0';
++    // Placeholder: echo argv to stdout capture. The follow-up patch swaps
++    // this for a real dispatch through PGM_KICAD::RunOneCliCommand().
++    std::string capturedStdout;
++
++    for( size_t i = 0; i < req.argv.size(); ++i )
++    {
++        capturedStdout += "argv[";
++        capturedStdout += std::to_string( i );
++        capturedStdout += "]=";
++        capturedStdout += req.argv[i];
++        capturedStdout += '\n';
++    }
+ 
+-    // For now, echo back a "not yet dispatching" response frame. Real
+-    // dispatch lands next patch.
+-    const char* reply =
+-            "x1\n0\n"; // exit frame, length 0 (see wire protocol in design doc)
++    capturedStdout += "cwd=";
++    capturedStdout += req.cwd;
++    capturedStdout += '\n';
+ 
+-    ::send( aClientFd, reply, std::strlen( reply ), MSG_NOSIGNAL );
++    writeResponse( aClientFd, /*exit=*/0, capturedStdout, /*stderr=*/std::string() );
+     ::close( aClientFd );
+ }
+ 
+-- 
+2.39.5
+
