@@ -37,6 +37,7 @@ Each patch is a `git format-patch` output — `git am` or `git apply` clean.
 | 30 | `0030-sexpr-parser-inline-whitespace-test.patch`                                  | `SEXPR::PARSER::parseString` was calling `whitespaceCharacters.find(*it) != npos` (linear scan over 7 chars) for every input byte. Replace with an inlined switch. | small but per-byte; noticeable on schematic parse | trivial |
 | 31 | `0031-gencad-d356-stdio-buffer.patch`                                             | Extend 0022's `setvbuf` pattern to two more wxFopen callers that were still on default BUFSIZ: GenCAD writer, IPC-D-356 writer. | small cumulative | trivial |
 | 32 | `0032-more-stdio-buffer-eeschema-netlist-and-pdf-workfile.patch`                  | Extends the setvbuf pattern to five more direct-fopen writers: eeschema's cadstar/orcadpcb2/pads/allegro netlist exporters, plus PDF_PLOTTER's temp workFile used to accumulate one page before compression. | small cumulative | trivial |
+| 33 | `0033-netinfo-list-fast-path-when-no-net-chains.patch`                            | `NETINFO_LIST::buildListOfNets` always built three `unordered_map<int,…>` reserved for `GetNetCount()`, populated them from all nets, Clear()d, then restored — to preserve `(net_chains ...)` data that only exists on a small minority of boards. Add a one-pass detector; if nothing to preserve, skip the whole dance. | small on typical boards; the win is per-net so scales with net count | trivial |
 
 ## Expected combined win (theoretical, not yet measured)
 

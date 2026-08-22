@@ -1,0 +1,134 @@
+From 03350ce921ed4d935f0e6549b4dcc0fd19c098a1 Mon Sep 17 00:00:00 2001
+From: icanc0 <ai7@vincentxie.net>
+Date: Sat, 22 Aug 2026 02:39:42 +0000
+Subject: [PATCH] =?UTF-8?q?P33:=20NETINFO=5FLIST::buildListOfNets=20?=
+ =?UTF-8?q?=E2=80=94=20fast-path=20when=20nothing=20to=20preserve?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+buildListOfNets always constructed three std::unordered_map<int,...>
+each reserving GetNetCount() slots, populated them from all nets,
+Clear()d all nets, then walked all nets again to restore state from
+the maps. All of that exists solely to preserve (net_chains ...) data
+that the parser set — which is present only on boards where the user
+has explicitly authored net chains (a small minority of boards).
+
+Add a one-pass scan up front: if every net has an empty netChain and
+niluuid terminal pads, skip preserve/restore entirely and just Clear()
+each net. Common case saves ~3 allocations + N inserts + N finds on
+board load.
+
+Behaviour on boards WITH net chains is unchanged (falls through to
+the original path).
+---
+ pcbnew/netinfo_list.cpp | 85 +++++++++++++++++++++++++++--------------
+ 1 file changed, 57 insertions(+), 28 deletions(-)
+
+diff --git a/pcbnew/netinfo_list.cpp b/pcbnew/netinfo_list.cpp
+index 45189770..9b34376d 100644
+--- a/pcbnew/netinfo_list.cpp
++++ b/pcbnew/netinfo_list.cpp
+@@ -181,42 +181,71 @@ void NETINFO_LIST::AppendNet( NETINFO_ITEM* aNewElement )
+ 
+ void NETINFO_LIST::buildListOfNets()
+ {
+-    // Preserve any parsed net-chain names and terminal pad UUIDs before clearing. The GUI load
+-    // path calls BuildListOfNets() after the board file is parsed (see files.cpp) which was
+-    // unintentionally wiping the m_netChain field set by the (net_chains ...) section.  Cache and
+-    // restore them so persisted chains survive the rebuild.
+-    std::unordered_map<int, wxString> preservedNetChains;
+-    std::unordered_map<int, KIID>     preservedPad0;
+-    std::unordered_map<int, KIID>     preservedPad1;
+-
+-    preservedNetChains.reserve( GetNetCount() );
+-    preservedPad0.reserve( GetNetCount() );
+-    preservedPad1.reserve( GetNetCount() );
++    // Perf fast-path: the preserve/Clear/restore dance below exists so
++    // (net_chains ...) data set by the parser survives the rebuild. Most
++    // boards have no net-chain section at all — in that case, nothing
++    // needs preserving and we can skip the three hash maps, their
++    // reserves, and their N inserts + N finds.
++    bool anyPreservedState = false;
+ 
+     for( NETINFO_ITEM* net : *this )
+     {
+-        preservedNetChains[ net->GetNetCode() ] = net->GetNetChain();
+-        preservedPad0[ net->GetNetCode() ]    = net->GetTerminalPadUuid( 0 );
+-        preservedPad1[ net->GetNetCode() ]    = net->GetTerminalPadUuid( 1 );
++        if( !net->GetNetChain().IsEmpty()
++            || net->GetTerminalPadUuid( 0 ) != niluuid
++            || net->GetTerminalPadUuid( 1 ) != niluuid )
++        {
++            anyPreservedState = true;
++            break;
++        }
+     }
+ 
+-    // Restore the initial state of NETINFO_ITEMs (except chains & terminal pad UUIDs which we reapply)
+-    for( NETINFO_ITEM* net : *this )
+-        net->Clear();
+-
+-    for( NETINFO_ITEM* net : *this )
++    if( !anyPreservedState )
++    {
++        // Common case: just reset each net.
++        for( NETINFO_ITEM* net : *this )
++            net->Clear();
++    }
++    else
+     {
+-        auto it = preservedNetChains.find( net->GetNetCode() );
+-        if( it != preservedNetChains.end() )
+-            net->SetNetChain( it->second );
++        // Preserve any parsed net-chain names and terminal pad UUIDs before
++        // clearing. The GUI load path calls BuildListOfNets() after the
++        // board file is parsed (see files.cpp) which was unintentionally
++        // wiping the m_netChain field set by the (net_chains ...) section.
++        // Cache and restore them so persisted chains survive the rebuild.
++        std::unordered_map<int, wxString> preservedNetChains;
++        std::unordered_map<int, KIID>     preservedPad0;
++        std::unordered_map<int, KIID>     preservedPad1;
++
++        preservedNetChains.reserve( GetNetCount() );
++        preservedPad0.reserve( GetNetCount() );
++        preservedPad1.reserve( GetNetCount() );
++
++        for( NETINFO_ITEM* net : *this )
++        {
++            preservedNetChains[ net->GetNetCode() ] = net->GetNetChain();
++            preservedPad0[ net->GetNetCode() ]    = net->GetTerminalPadUuid( 0 );
++            preservedPad1[ net->GetNetCode() ]    = net->GetTerminalPadUuid( 1 );
++        }
+ 
+-        auto ip0 = preservedPad0.find( net->GetNetCode() );
+-        if( ip0 != preservedPad0.end() )
+-            net->SetTerminalPadUuid( 0, ip0->second );
++        // Restore the initial state of NETINFO_ITEMs (except chains &
++        // terminal pad UUIDs which we reapply)
++        for( NETINFO_ITEM* net : *this )
++            net->Clear();
+ 
+-        auto ip1 = preservedPad1.find( net->GetNetCode() );
+-        if( ip1 != preservedPad1.end() )
+-            net->SetTerminalPadUuid( 1, ip1->second );
++        for( NETINFO_ITEM* net : *this )
++        {
++            auto it = preservedNetChains.find( net->GetNetCode() );
++            if( it != preservedNetChains.end() )
++                net->SetNetChain( it->second );
++
++            auto ip0 = preservedPad0.find( net->GetNetCode() );
++            if( ip0 != preservedPad0.end() )
++                net->SetTerminalPadUuid( 0, ip0->second );
++
++            auto ip1 = preservedPad1.find( net->GetNetCode() );
++            if( ip1 != preservedPad1.end() )
++                net->SetTerminalPadUuid( 1, ip1->second );
++        }
+     }
+ 
+     m_parent->SynchronizeNetsAndNetClasses( false );
+-- 
+2.39.5
+
