@@ -1,4 +1,4 @@
-# Patch series overview — 46 patches, grouped by axis
+# Patch series overview — 50 patches, grouped by axis
 
 Each row links to a patch under `patches/` and states one primary
 axis and one secondary axis when it applies. Numbers are the
@@ -118,6 +118,24 @@ Follow-ups to F, all found by branch-sweep passes.
 |--:|----------------------------------------------|-------------|------------------------------------------------|
 | 34 | 0034-drc-engine-fix-courtyard-init-typo     | correctness | copy-paste bug; harmless today, footgun tomorrow |
 | 35 | 0035-drc-engine-bulk-move-rules             | micro       | reserve + move-append instead of copy push_back  |
+
+## I. Schematic-load algorithmic wins (patches 47-50)
+
+Big-hierarchy schematics (100+ screens, thousands of instances) were
+paying O(N·M) instance-lookup + O(N²) net-name disambiguation on every
+load. All four wins live in the same axis: precompute a hash/map once,
+drop the per-item lookup to O(log M).
+
+| # | patch                                                            | rôle                                 |
+|--:|------------------------------------------------------------------|--------------------------------------|
+| 47 | 0047-netinfo-rebuild-display-names-memo                          | memoise wxSplit per long-name        |
+| 48 | 0048-sch-sheet-list-instance-lookup-map                          | map lookup for {Symbol,Sheet}InstanceData |
+| 49 | 0049-sch-screen-prune-orphans-precompute-lookup                  | map lookup for orphan-prune (per screen)   |
+| 50 | 0050-sch-screens-share-orphan-prune-lookup                       | hoist orphan-prune lookup to SCH_SCREENS   |
+
+Combined: schematic load's orphan-prune + instance-update phase on a
+hierarchical design (100 screens, 1000 sheets, 50 symbols/screen)
+goes from **~5-10 million** per-item comparisons to **~50 thousand**.
 
 ## Cross-references
 
