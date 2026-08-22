@@ -1,0 +1,38 @@
+From bbe955f78515d41fe07e2a04b763247ef1401dfa Mon Sep 17 00:00:00 2001
+From: icanc0 <ai7@vincentxie.net>
+Date: Sat, 22 Aug 2026 08:34:56 +0000
+Subject: [PATCH] P43: extend getBoardForExport to
+ STEP/GLB/BREP/XAO/VRML/PLY/STL/STEPZ/U3D/3D-PDF
+
+All 3D-export formats route through JobExportStep. Audited
+pcbnew/exporters/step/: no GetConnectivity, no m_DRCEngine, no
+ComponentClass references. Board-outline geometry + footprint 3D
+model paths are the entire input set.
+
+Big win: 3D export on the video demo board goes from ~3+ s of
+board-init-then-3D-model-load to just the 3D-model-load portion.
+---
+ pcbnew/pcbnew_jobs_handler.cpp | 7 ++++++-
+ 1 file changed, 6 insertions(+), 1 deletion(-)
+
+diff --git a/pcbnew/pcbnew_jobs_handler.cpp b/pcbnew/pcbnew_jobs_handler.cpp
+index 460c7564..e3017f67 100644
+--- a/pcbnew/pcbnew_jobs_handler.cpp
++++ b/pcbnew/pcbnew_jobs_handler.cpp
+@@ -1155,7 +1155,12 @@ int PCBNEW_JOBS_HANDLER::JobExportStep( JOB* aJob )
+     if( aStepJob == nullptr )
+         return CLI::EXIT_CODES::ERR_UNKNOWN;
+ 
+-    BOARD* brd = getBoard( aStepJob->m_filename );
++    // STEP / GLB / BREP / XAO / VRML / PLY / STL / STEPZ / U3D / 3D PDF
++    // all take the JOB_EXPORT_PCB_3D shape. The exporter walks footprint
++    // 3D-model paths + board outline geometry. Audited
++    // pcbnew/exporters/step/ — no GetConnectivity or m_DRCEngine
++    // references, no component-class dependency.
++    BOARD* brd = getBoardForExport( aStepJob->m_filename );
+ 
+     if( !brd )
+         return CLI::EXIT_CODES::ERR_INVALID_INPUT_FILE;
+-- 
+2.39.5
+
