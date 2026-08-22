@@ -1,0 +1,64 @@
+From 4a2282fd1b5c1c8d456a5fe33087dc9e1a87f5fd Mon Sep 17 00:00:00 2001
+From: icanc0 <ai7@vincentxie.net>
+Date: Sat, 22 Aug 2026 07:30:34 +0000
+Subject: [PATCH] P41: extend getBoardForExport to Stats/Stackup/GenCAD
+ exporters
+
+Three more exporters that walk board items but never touch the
+connectivity graph or DRC engine:
+
+- Stats: ComputeBoardStatistics does area/count math (no
+  GetConnectivity refs in board_statistics.cpp).
+- Stackup: reads BOARD_DESIGN_SETTINGS.m_stackup, nothing else.
+- GenCAD: walks pads/tracks/vias/footprints, uses per-item net names
+  (no GetConnectivity refs in export_gencad_writer.cpp).
+
+Same win as 0003 on big boards (~1-2 s saved on the full-init
+connectivity+DRC pass we no longer do).
+---
+ pcbnew/pcbnew_jobs_handler.cpp | 15 ++++++++++++---
+ 1 file changed, 12 insertions(+), 3 deletions(-)
+
+diff --git a/pcbnew/pcbnew_jobs_handler.cpp b/pcbnew/pcbnew_jobs_handler.cpp
+index c7b693ad..fb2cad9f 100644
+--- a/pcbnew/pcbnew_jobs_handler.cpp
++++ b/pcbnew/pcbnew_jobs_handler.cpp
+@@ -2173,7 +2173,11 @@ int PCBNEW_JOBS_HANDLER::JobExportGencad( JOB* aJob )
+     if( aGencadJob == nullptr )
+         return CLI::EXIT_CODES::ERR_UNKNOWN;
+ 
+-    BOARD* brd = getBoard( aGencadJob->m_filename );
++    // GenCAD exporter walks tracks/vias/pads/footprints and writes their
++    // geometry + net-name. Doesn't touch connectivity graph or DRC engine
++    // (verified: no GetConnectivity/DRCEngine reference in
++    // export_gencad_writer.cpp).
++    BOARD* brd = getBoardForExport( aGencadJob->m_filename );
+ 
+     if( !brd )
+         return CLI::EXIT_CODES::ERR_INVALID_INPUT_FILE;
+@@ -2229,7 +2233,10 @@ int PCBNEW_JOBS_HANDLER::JobExportStats( JOB* aJob )
+     if( statsJob == nullptr )
+         return CLI::EXIT_CODES::ERR_UNKNOWN;
+ 
+-    BOARD* brd = getBoard( statsJob->m_filename );
++    // Board statistics walks the item collections and does area/count math.
++    // No connectivity, no DRC engine (verified: no GetConnectivity /
++    // m_DRCEngine references in board_statistics.cpp).
++    BOARD* brd = getBoardForExport( statsJob->m_filename );
+ 
+     if( !brd )
+         return CLI::EXIT_CODES::ERR_INVALID_INPUT_FILE;
+@@ -2307,7 +2314,9 @@ int PCBNEW_JOBS_HANDLER::JobExportStackup( JOB* aJob )
+     if( stackupJob == nullptr )
+         return CLI::EXIT_CODES::ERR_UNKNOWN;
+ 
+-    BOARD* brd = getBoard( stackupJob->m_filename );
++    // Stackup reader pulls from BOARD_DESIGN_SETTINGS.m_stackup only —
++    // no connectivity, no DRC engine. Safe to use the export-only load path.
++    BOARD* brd = getBoardForExport( stackupJob->m_filename );
+ 
+     if( !brd )
+         return CLI::EXIT_CODES::ERR_INVALID_INPUT_FILE;
+-- 
+2.39.5
+
