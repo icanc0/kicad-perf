@@ -1,0 +1,142 @@
+From 519157ac6a5182f745bf9a0c6094590b6551195a Mon Sep 17 00:00:00 2001
+From: icanc0 <ai7@vincentxie.net>
+Date: Sat, 22 Aug 2026 02:05:15 +0000
+Subject: [PATCH] P32: bigger stdio buffer for schematic netlist exporters +
+ PDF workFile
+
+Extends 0022/0024/0031's setvbuf pattern to five more direct-fopen
+writers: eeschema/netlist_exporter_cadstar, orcadpcb2, pads, allegro
+(both files it opens), plus PDF_PLOTTER's temp workFile used to
+accumulate a page before compression.
+
+Same rationale: default BUFSIZ is 4-8 KB, these writers push tens of
+thousands of short lines through fmt::print / fprintf, and every ~800
+lines becomes a write() syscall.
+---
+ common/plotters/PDF_plotter.cpp                           | 7 +++++++
+ eeschema/netlist_exporters/netlist_exporter_allegro.cpp   | 7 +++++++
+ eeschema/netlist_exporters/netlist_exporter_cadstar.cpp   | 5 +++++
+ eeschema/netlist_exporters/netlist_exporter_orcadpcb2.cpp | 4 ++++
+ eeschema/netlist_exporters/netlist_exporter_pads.cpp      | 4 ++++
+ 5 files changed, 27 insertions(+)
+
+diff --git a/common/plotters/PDF_plotter.cpp b/common/plotters/PDF_plotter.cpp
+index 443110d6..ee6c7c43 100644
+--- a/common/plotters/PDF_plotter.cpp
++++ b/common/plotters/PDF_plotter.cpp
+@@ -756,6 +756,13 @@ int PDF_PLOTTER::startPdfStream( int aHandle )
+     m_workFilename = wxFileName::CreateTempFileName( "" );
+     m_workFile = wxFopen( m_workFilename, wxT( "w+b" ) );
+     wxASSERT( m_workFile );
++
++    // Perf (kicad-perf 0022 companion): the temp stream file receives
++    // most of the PDF page's content before it gets compressed and
++    // written to the final PDF. Bump to 128 KB to reduce write() churn.
++    if( m_workFile )
++        (void) std::setvbuf( m_workFile, nullptr, _IOFBF, 128 * 1024 );
++
+     return handle;
+ }
+ 
+diff --git a/eeschema/netlist_exporters/netlist_exporter_allegro.cpp b/eeschema/netlist_exporters/netlist_exporter_allegro.cpp
+index 9b362b31..dd0b1d75 100644
+--- a/eeschema/netlist_exporters/netlist_exporter_allegro.cpp
++++ b/eeschema/netlist_exporters/netlist_exporter_allegro.cpp
+@@ -17,6 +17,7 @@
+  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+  */
+ 
++#include <cstdio>
+ #include <confirm.h>
+ #include <refdes_utils.h>
+ #include <sch_edit_frame.h>
+@@ -59,6 +60,9 @@ bool NETLIST_EXPORTER_ALLEGRO::WriteNetlist( const wxString& aOutFileName,
+         return false;
+     }
+ 
++    // Perf (kicad-perf 0022 companion): bigger stdio buffer.
++    (void) std::setvbuf( m_f, nullptr, _IOFBF, 64 * 1024 );
++
+     try
+     {
+         fmt::print( m_f, "(NETLIST)\n" );
+@@ -406,6 +410,9 @@ void NETLIST_EXPORTER_ALLEGRO::toAllegroPackages()
+             continue;
+         }
+ 
++        // Perf (kicad-perf 0022 companion): bigger stdio buffer.
++        (void) std::setvbuf( d, nullptr, _IOFBF, 32 * 1024 );
++
+         footprintText = footprintText.AfterLast( ':' );
+ 
+         wxArrayString footprintAlt;
+diff --git a/eeschema/netlist_exporters/netlist_exporter_cadstar.cpp b/eeschema/netlist_exporters/netlist_exporter_cadstar.cpp
+index a369107e..26e4bf9a 100644
+--- a/eeschema/netlist_exporters/netlist_exporter_cadstar.cpp
++++ b/eeschema/netlist_exporters/netlist_exporter_cadstar.cpp
+@@ -19,6 +19,7 @@
+  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+  */
+ 
++#include <cstdio>
+ #include <build_version.h>
+ #include <confirm.h>
+ 
+@@ -48,6 +49,10 @@ bool NETLIST_EXPORTER_CADSTAR::WriteNetlist( const wxString& aOutFileName,
+         return false;
+     }
+ 
++    // Perf (kicad-perf 0022 companion): bigger stdio buffer for the same
++    // reason plot files got one — netlist exporters emit many short lines.
++    (void) std::setvbuf( f, nullptr, _IOFBF, 64 * 1024 );
++
+     try
+     {
+         wxString StartCmpDesc = StartLine + wxT( "ADD_COM" );
+diff --git a/eeschema/netlist_exporters/netlist_exporter_orcadpcb2.cpp b/eeschema/netlist_exporters/netlist_exporter_orcadpcb2.cpp
+index b8613773..63dcf37d 100644
+--- a/eeschema/netlist_exporters/netlist_exporter_orcadpcb2.cpp
++++ b/eeschema/netlist_exporters/netlist_exporter_orcadpcb2.cpp
+@@ -19,6 +19,7 @@
+  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+  */
+ 
++#include <cstdio>
+ #include <algorithm>
+ #include <vector>
+ 
+@@ -53,6 +54,9 @@ bool NETLIST_EXPORTER_ORCADPCB2::WriteNetlist( const wxString& aOutFileName,
+         return false;
+     }
+ 
++    // Perf (kicad-perf 0022 companion): bigger stdio buffer.
++    (void) std::setvbuf( f, nullptr, _IOFBF, 64 * 1024 );
++
+     std::vector< SCH_REFERENCE > cmpList;
+ 
+     try
+diff --git a/eeschema/netlist_exporters/netlist_exporter_pads.cpp b/eeschema/netlist_exporters/netlist_exporter_pads.cpp
+index 870e4d5c..da429174 100644
+--- a/eeschema/netlist_exporters/netlist_exporter_pads.cpp
++++ b/eeschema/netlist_exporters/netlist_exporter_pads.cpp
+@@ -17,6 +17,7 @@
+  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+  */
+ 
++#include <cstdio>
+ #include <build_version.h>
+ #include <confirm.h>
+ 
+@@ -43,6 +44,9 @@ bool NETLIST_EXPORTER_PADS::WriteNetlist( const wxString& aOutFileName,
+         return false;
+     }
+ 
++    // Perf (kicad-perf 0022 companion): bigger stdio buffer.
++    (void) std::setvbuf( f, nullptr, _IOFBF, 64 * 1024 );
++
+     wxString msg;
+     wxString footprint;
+     SCH_SYMBOL* symbol;
+-- 
+2.39.5
+

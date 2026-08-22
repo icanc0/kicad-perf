@@ -36,6 +36,7 @@ Each patch is a `git format-patch` output — `git am` or `git apply` clean.
 | 29 | `0029-dsnlexer-opt-in-separator-tracking.patch`                                   | `DSNLEXER::NextTok` was char-appending each whitespace byte into `curSeparator` on every token. Only `DRC_RULES_PARSER` reads that string. Make it opt-in via `SetTrackSeparator(true)` in the DRC parser ctor. | ~10-30 ms on board-load; more on token-dense files | trivial |
 | 30 | `0030-sexpr-parser-inline-whitespace-test.patch`                                  | `SEXPR::PARSER::parseString` was calling `whitespaceCharacters.find(*it) != npos` (linear scan over 7 chars) for every input byte. Replace with an inlined switch. | small but per-byte; noticeable on schematic parse | trivial |
 | 31 | `0031-gencad-d356-stdio-buffer.patch`                                             | Extend 0022's `setvbuf` pattern to two more wxFopen callers that were still on default BUFSIZ: GenCAD writer, IPC-D-356 writer. | small cumulative | trivial |
+| 32 | `0032-more-stdio-buffer-eeschema-netlist-and-pdf-workfile.patch`                  | Extends the setvbuf pattern to five more direct-fopen writers: eeschema's cadstar/orcadpcb2/pads/allegro netlist exporters, plus PDF_PLOTTER's temp workFile used to accumulate one page before compression. | small cumulative | trivial |
 
 ## Expected combined win (theoretical, not yet measured)
 
