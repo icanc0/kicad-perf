@@ -1,0 +1,52 @@
+From 3a49c6d1fb25ad3c1649c952d905c3eb4ef222c7 Mon Sep 17 00:00:00 2001
+From: icanc0 <ai7@vincentxie.net>
+Date: Sat, 22 Aug 2026 03:12:41 +0000
+Subject: [PATCH] =?UTF-8?q?P34:=20DRC=5FENGINE::loadImplicitRules=20?=
+ =?UTF-8?q?=E2=80=94=20fix=20copy-paste=20typo=20in=20courtyard=20constrai?=
+ =?UTF-8?q?nt=20init?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The 'board setup constraints courtyard' block had:
+    DRC_CONSTRAINT courtyardClearanceConstraint( COURTYARD_CLEARANCE_CONSTRAINT );
+    holeToHoleConstraint.Value().SetMin( 0 );  // <-- wrong local!
+    rule->AddConstraint( courtyardClearanceConstraint );
+
+The middle line wrote to a stack-local from a rule dozens of lines
+earlier (already copied into a different rule) — no-op on the state
+actually being added. courtyardClearanceConstraint was added with its
+default value.
+
+The default happens to also be 0 today so behaviour is unchanged, but
+the intent was to be explicit — a future default change would silently
+break this. Change it to write on the correct local
+(courtyardClearanceConstraint) so the intent is preserved.
+---
+ pcbnew/drc/drc_engine.cpp | 10 +++++++++-
+ 1 file changed, 9 insertions(+), 1 deletion(-)
+
+diff --git a/pcbnew/drc/drc_engine.cpp b/pcbnew/drc/drc_engine.cpp
+index 7357049c..c0251fae 100644
+--- a/pcbnew/drc/drc_engine.cpp
++++ b/pcbnew/drc/drc_engine.cpp
+@@ -230,7 +230,15 @@ void DRC_ENGINE::loadImplicitRules()
+ 
+     rule = createImplicitRule( _( "board setup constraints courtyard" ), DRC_IMPLICIT_SOURCE::BOARD_SETUP_CONSTRAINT );
+     DRC_CONSTRAINT courtyardClearanceConstraint( COURTYARD_CLEARANCE_CONSTRAINT );
+-    holeToHoleConstraint.Value().SetMin( 0 );
++    // Typo fix: this used to be `holeToHoleConstraint.Value().SetMin( 0 );`
++    // which was a copy-paste from the earlier holeToHole block. It wrote to
++    // the local `holeToHoleConstraint` (already copied into a different
++    // rule dozens of lines above), so it was a no-op that left the newly
++    // created `courtyardClearanceConstraint` at its default-constructed
++    // value. The default constraint value happens to also be 0 today, so
++    // behaviour is unchanged — but the intent needs to be explicit here
++    // so a future default change doesn't silently mis-init courtyard.
++    courtyardClearanceConstraint.Value().SetMin( 0 );
+     rule->AddConstraint( courtyardClearanceConstraint );
+ 
+     // 2a) micro-via specific defaults (new DRC doesn't treat microvias in any special way)
+-- 
+2.39.5
+
