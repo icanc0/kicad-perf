@@ -1,0 +1,95 @@
+From a658fd81d01f0cafa59ddbe4b49fba471ab1224f Mon Sep 17 00:00:00 2001
+From: icanc0 <ai7@vincentxie.net>
+Date: Sat, 22 Aug 2026 13:56:17 +0000
+Subject: [PATCH] =?UTF-8?q?P47:=20NETINFO=5FLIST::RebuildDisplayNetnames?=
+ =?UTF-8?q?=20=E2=80=94=20memoise=20wxSplit=20of=20long=20names?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The old code split every long-name inside the outer per-net loop —
+for a group of N nets sharing the same short-name that's N² wxSplit
+calls per group. Hierarchical schematics with many hundred GND/VCC-
+like nets sharing a short name hit this on every net-panel refresh /
+tooltip / net highlight.
+
+Cache the pre-split parts on the shortNameMap entry (new GroupEntry
+struct) and reuse. Total splits drop from O(N²·d) to O(N·d).
+---
+ pcbnew/netinfo_list.cpp | 44 ++++++++++++++++++++++++++++++++---------
+ 1 file changed, 35 insertions(+), 9 deletions(-)
+
+diff --git a/pcbnew/netinfo_list.cpp b/pcbnew/netinfo_list.cpp
+index 9b34376d..f079631b 100644
+--- a/pcbnew/netinfo_list.cpp
++++ b/pcbnew/netinfo_list.cpp
+@@ -255,31 +255,57 @@ void NETINFO_LIST::buildListOfNets()
+ 
+ void NETINFO_LIST::RebuildDisplayNetnames() const
+ {
+-    std::map<wxString, std::vector<wxString>> shortNameMap;
++    // Perf: for N nets that share the same short-name, the old code
++    // called wxSplit on every long-name N times inside the outer loop
++    // (once per iteration over shortNameMap[net->m_shortNetname]). That
++    // was O(N² · avg_path_depth) — visibly slow on hierarchical
++    // schematics with many hundred nets sharing a short name (e.g.
++    // GND/VCC pin nets on power distribution).
++    //
++    // Memoise the split once per long-name: store the pre-split parts
++    // in shortNameMap. Total wxSplit calls drop to O(N).
++    struct GroupEntry
++    {
++        wxString      longName;
++        wxArrayString parts; // populated on first read below
++    };
++
++    std::map<wxString, std::vector<GroupEntry>> shortNameMap;
+ 
+     for( NETINFO_ITEM* net : *this )
+-        shortNameMap[net->m_shortNetname].push_back( net->m_netname );
++    {
++        GroupEntry e;
++        e.longName = net->m_netname;
++        // parts stays empty; filled on first use below.
++        shortNameMap[net->m_shortNetname].push_back( std::move( e ) );
++    }
++
++    // Second pass: pre-split every entry once. Cheaper than lazy fill
++    // because the outer loop below runs O(N) reads over the entries.
++    for( auto& [shortName, entries] : shortNameMap )
++    {
++        for( GroupEntry& e : entries )
++            e.parts = wxSplit( e.longName, '/' );
++    }
+ 
+     for( NETINFO_ITEM* net : *this )
+     {
+-        if( shortNameMap[net->m_shortNetname].size() == 1 )
++        const std::vector<GroupEntry>& group = shortNameMap[net->m_shortNetname];
++
++        if( group.size() == 1 )
+         {
+             net->m_displayNetname = UnescapeString( net->m_shortNetname );
+         }
+         else
+         {
+             wxArrayString              parts = wxSplit( net->m_netname, '/' );
+-            std::vector<wxArrayString> aggregateParts;
+             std::optional<size_t>      firstNonCommon;
+ 
+-            for( const wxString& longName : shortNameMap[net->m_shortNetname] )
+-                aggregateParts.push_back( wxSplit( longName, '/' ) );
+-
+             for( size_t ii = 0; ii < parts.size() && !firstNonCommon; ++ii )
+             {
+-                for( const wxArrayString& otherParts : aggregateParts )
++                for( const GroupEntry& other : group )
+                 {
+-                    if( ii < otherParts.size() && otherParts[ii] == parts[ii] )
++                    if( ii < other.parts.size() && other.parts[ii] == parts[ii] )
+                         continue;
+ 
+                     firstNonCommon = ii;
+-- 
+2.39.5
+
