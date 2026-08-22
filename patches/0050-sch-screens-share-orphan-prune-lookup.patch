@@ -1,0 +1,158 @@
+From fbedf6186b49765b14a639b9bc08a9ac56a84635 Mon Sep 17 00:00:00 2001
+From: icanc0 <ai7@vincentxie.net>
+Date: Sat, 22 Aug 2026 16:24:43 +0000
+Subject: [PATCH] =?UTF-8?q?P50:=20SCH=5FSCREENS::PruneOrphaned{Symbol,Shee?=
+ =?UTF-8?q?t}Instances=20=E2=80=94=20build=20lookup=20once=20per=20hierarc?=
+ =?UTF-8?q?hy?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Follow-up to 0049: the SCH_SCREEN::PruneOrphaned*Instances calls now
+build the (KIID_PATH -> SCH_SHEET_PATH) lookup map inside each call,
+so SCH_SCREENS (which walks every screen in the hierarchy) still
+paid it S times.
+
+Add map-taking overloads of the SCH_SCREEN methods and have
+SCH_SCREENS build the lookup once, hand it to every screen. Backwards-
+compatible: the old signature stays, delegates to the new one.
+
+Total goes from O(S·P·log P) build cost down to O(P·log P). Big
+schematics (many screens) benefit most.
+---
+ eeschema/sch_screen.cpp | 43 ++++++++++++++++++++++++++++++++---------
+ eeschema/sch_screen.h   | 16 +++++++++++++++
+ 2 files changed, 50 insertions(+), 9 deletions(-)
+
+diff --git a/eeschema/sch_screen.cpp b/eeschema/sch_screen.cpp
+index 514c9dfe..da358d81 100644
+--- a/eeschema/sch_screen.cpp
++++ b/eeschema/sch_screen.cpp
+@@ -1624,6 +1624,21 @@ buildOrphanPruneLookup( const SCH_SHEET_LIST& aValidSheetPaths )
+ 
+ void SCH_SCREEN::PruneOrphanedSymbolInstances( const wxString& aProjectName,
+                                                const SCH_SHEET_LIST& aValidSheetPaths )
++{
++    if( aProjectName.IsEmpty() )
++        return;
++
++    // Direct caller: build the lookup then delegate to the map-taking
++    // overload.  SCH_SCREENS::PruneOrphanedSymbolInstances instead
++    // builds it once and passes the map straight in — see the wrapper
++    // in this file, line ~2470.
++    std::map<KIID_PATH, SCH_SHEET_PATH> lookup = buildOrphanPruneLookup( aValidSheetPaths );
++    PruneOrphanedSymbolInstances( aProjectName, lookup );
++}
++
++
++void SCH_SCREEN::PruneOrphanedSymbolInstances(
++        const wxString& aProjectName, const std::map<KIID_PATH, SCH_SHEET_PATH>& lookup )
+ {
+     // The project name cannot be empty.  Projects older than 7.0 did not save project names
+     // when saving instance data.  Running this algorithm with an empty project name would
+@@ -1633,8 +1648,6 @@ void SCH_SCREEN::PruneOrphanedSymbolInstances( const wxString& aProjectName,
+     if( aProjectName.IsEmpty() )
+         return;
+ 
+-    std::map<KIID_PATH, SCH_SHEET_PATH> lookup = buildOrphanPruneLookup( aValidSheetPaths );
+-
+     for( SCH_ITEM* item : Items().OfType( SCH_SYMBOL_T ) )
+     {
+         SCH_SYMBOL* symbol = static_cast<SCH_SYMBOL*>( item );
+@@ -1673,15 +1686,19 @@ void SCH_SCREEN::PruneOrphanedSymbolInstances( const wxString& aProjectName,
+ void SCH_SCREEN::PruneOrphanedSheetInstances( const wxString& aProjectName,
+                                               const SCH_SHEET_LIST& aValidSheetPaths )
+ {
+-    // The project name cannot be empty.  Projects older than 7.0 did not save project names
+-    // when saving instance data.  Running this algorithm with an empty project name would
+-    // clobber all instance data for projects other than the current one when a schematic
+-    // file is shared across multiple projects.  Because running the schematic editor in
+-    // stand alone mode can result in an empty project name, do not assert here.
+     if( aProjectName.IsEmpty() )
+         return;
+ 
+     std::map<KIID_PATH, SCH_SHEET_PATH> lookup = buildOrphanPruneLookup( aValidSheetPaths );
++    PruneOrphanedSheetInstances( aProjectName, lookup );
++}
++
++
++void SCH_SCREEN::PruneOrphanedSheetInstances(
++        const wxString& aProjectName, const std::map<KIID_PATH, SCH_SHEET_PATH>& lookup )
++{
++    if( aProjectName.IsEmpty() )
++        return;
+ 
+     for( SCH_ITEM* item : Items().OfType( SCH_SHEET_T ) )
+     {
+@@ -2476,8 +2493,13 @@ void SCH_SCREENS::PruneOrphanedSymbolInstances( const wxString& aProjectName,
+     if( aProjectName.IsEmpty() )
+         return;
+ 
++    // Perf (kicad-perf 0049 follow-up): build the (KIID_PATH ->
++    // SCH_SHEET_PATH) lookup once here, then hand it to every screen.
++    // Previously each screen rebuilt the map itself.
++    std::map<KIID_PATH, SCH_SHEET_PATH> lookup = buildOrphanPruneLookup( aValidSheetPaths );
++
+     for( SCH_SCREEN* screen = GetFirst(); screen; screen = GetNext() )
+-        screen->PruneOrphanedSymbolInstances( aProjectName, aValidSheetPaths );
++        screen->PruneOrphanedSymbolInstances( aProjectName, lookup );
+ }
+ 
+ 
+@@ -2487,8 +2509,11 @@ void SCH_SCREENS::PruneOrphanedSheetInstances( const wxString& aProjectName,
+     if( aProjectName.IsEmpty() )
+         return;
+ 
++    // Perf: build the lookup once, share across all screens.
++    std::map<KIID_PATH, SCH_SHEET_PATH> lookup = buildOrphanPruneLookup( aValidSheetPaths );
++
+     for( SCH_SCREEN* screen = GetFirst(); screen; screen = GetNext() )
+-        screen->PruneOrphanedSheetInstances( aProjectName, aValidSheetPaths );
++        screen->PruneOrphanedSheetInstances( aProjectName, lookup );
+ }
+ 
+ 
+diff --git a/eeschema/sch_screen.h b/eeschema/sch_screen.h
+index 6a515be5..c260a561 100644
+--- a/eeschema/sch_screen.h
++++ b/eeschema/sch_screen.h
+@@ -21,6 +21,7 @@
+ #ifndef SCREEN_H
+ #define SCREEN_H
+ 
++#include <map>
+ #include <memory>
+ #include <stddef.h>
+ #include <unordered_set>
+@@ -580,6 +581,14 @@ public:
+     void PruneOrphanedSymbolInstances( const wxString& aProjectName,
+                                        const SCH_SHEET_LIST& aValidSheetPaths );
+ 
++    /**
++     * Perf-oriented variant that reuses a pre-built path lookup, so the
++     * SCH_SCREENS driver doesn't rebuild it per screen. `aPathLookup`
++     * must be the map produced by `SCH_SCREENS::BuildOrphanPruneLookup`.
++     */
++    void PruneOrphanedSymbolInstances( const wxString& aProjectName,
++                                       const std::map<KIID_PATH, SCH_SHEET_PATH>& aPathLookup );
++
+     /**
+      * Remove all invalid sheet instance data in this screen object for the project defined
+      * by \a aProjectName and the list of \a aValidSheetPaths.
+@@ -595,6 +604,13 @@ public:
+     void PruneOrphanedSheetInstances( const wxString& aProjectName,
+                                       const SCH_SHEET_LIST& aValidSheetPaths );
+ 
++    /**
++     * Perf-oriented variant. See `PruneOrphanedSymbolInstances(...,
++     * aPathLookup)`.
++     */
++    void PruneOrphanedSheetInstances( const wxString& aProjectName,
++                                      const std::map<KIID_PATH, SCH_SHEET_PATH>& aPathLookup );
++
+     /**
+      * @return a list of names of all of the sheets in this schematic file.
+      */
+-- 
+2.39.5
+
