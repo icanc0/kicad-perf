@@ -35,6 +35,7 @@ Each patch is a `git format-patch` output — `git am` or `git apply` clean.
 | 28 | `0028-line-reader-fgets-fast-path.patch`                                          | `FILE_LINE_READER::ReadLine` looped one char at a time via `getc_unlocked` + a bounds-check pair. Rewrite to grow the buffer and use `fgets` — glibc calls memchr internally (vectorised) to scan for `\n`, 8-16× faster than the per-char loop. | ~50-100 ms on board-load for a big .kicad_pcb | low — same visible semantics |
 | 29 | `0029-dsnlexer-opt-in-separator-tracking.patch`                                   | `DSNLEXER::NextTok` was char-appending each whitespace byte into `curSeparator` on every token. Only `DRC_RULES_PARSER` reads that string. Make it opt-in via `SetTrackSeparator(true)` in the DRC parser ctor. | ~10-30 ms on board-load; more on token-dense files | trivial |
 | 30 | `0030-sexpr-parser-inline-whitespace-test.patch`                                  | `SEXPR::PARSER::parseString` was calling `whitespaceCharacters.find(*it) != npos` (linear scan over 7 chars) for every input byte. Replace with an inlined switch. | small but per-byte; noticeable on schematic parse | trivial |
+| 31 | `0031-gencad-d356-stdio-buffer.patch`                                             | Extend 0022's `setvbuf` pattern to two more wxFopen callers that were still on default BUFSIZ: GenCAD writer, IPC-D-356 writer. | small cumulative | trivial |
 
 ## Expected combined win (theoretical, not yet measured)
 
