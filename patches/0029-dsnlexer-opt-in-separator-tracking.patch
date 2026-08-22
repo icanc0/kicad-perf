@@ -1,0 +1,112 @@
+From f8531bc164f4d01cbc09e7c4178d1fdd28c93561 Mon Sep 17 00:00:00 2001
+From: icanc0 <ai7@vincentxie.net>
+Date: Sat, 22 Aug 2026 00:20:02 +0000
+Subject: [PATCH] =?UTF-8?q?P29:=20DSNLEXER=20=E2=80=94=20opt-in=20curSepar?=
+ =?UTF-8?q?ator=20tracking=20(skip=20char-append=20per=20token=20by=20defa?=
+ =?UTF-8?q?ult)?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+DSNLEXER::NextTok appended each leading-whitespace byte to a
+'curSeparator' std::string on every token, then cleared it at the
+start of the next token. On a 5 MB .kicad_pcb with ~1 M tokens
+that's ~4 M char-appends and ~1 M clears — for a string that only
+DRC_RULES_PARSER reads.
+
+Add SetTrackSeparator(bool) on DSNLEXER (default false) and gate the
+capture on it. DRC_RULES_PARSER::DRC_RULES_PARSER turns it on. All
+other DSNLEXER users (pcb parser, sch parser, symbol parser, footprint
+parser, drawing sheet parser, netlist parser, board_stackup parser,
+netclass parser, etc.) implicitly skip the char-append path.
+
+Same visible behaviour for callers that use CurSeparator().
+---
+ common/dsnlexer.cpp            | 10 +++++++---
+ include/dsnlexer.h             | 13 +++++++++++++
+ pcbnew/drc/drc_rule_parser.cpp |  3 +++
+ 3 files changed, 23 insertions(+), 3 deletions(-)
+
+diff --git a/common/dsnlexer.cpp b/common/dsnlexer.cpp
+index 32406586..edd31f69 100644
+--- a/common/dsnlexer.cpp
++++ b/common/dsnlexer.cpp
+@@ -540,7 +540,9 @@ int DSNLEXER::NextTok()
+     const char*   head = cur;
+ 
+     prevTok = curTok;
+-    curSeparator.clear();
++
++    if( m_trackSeparator )
++        curSeparator.clear();
+ 
+     if( curTok == DSN_EOF )
+         goto exit;
+@@ -564,7 +566,8 @@ L_read:
+         // skip leading whitespace
+         while( cur < limit && isSpace( *cur ) )
+         {
+-            curSeparator += *cur;
++            if( m_trackSeparator )
++                curSeparator += *cur;
+             ++cur;
+         }
+ 
+@@ -599,7 +602,8 @@ L_read:
+         // skip leading whitespace
+         while( cur < limit && isSpace( *cur ) )
+         {
+-            curSeparator += *cur;
++            if( m_trackSeparator )
++                curSeparator += *cur;
+             ++cur;
+         }
+     }
+diff --git a/include/dsnlexer.h b/include/dsnlexer.h
+index 311c9f95..d5ac2248 100644
+--- a/include/dsnlexer.h
++++ b/include/dsnlexer.h
+@@ -426,6 +426,18 @@ public:
+         return curSeparator;
+     }
+ 
++    /**
++     * Enable capture of the leading-whitespace bytes into `curSeparator`.
++     *
++     * Default off. Only DRC_RULE_PARSER currently reads `CurSeparator()`
++     * to reproduce the source text of an expression; every other lexer
++     * client parses the tokens themselves and doesn't care about the
++     * separator between them. Char-appending each whitespace byte on a
++     * ~5 MB .kicad_pcb costs enough to be worth skipping when nobody
++     * asks for it.
++     */
++    void SetTrackSeparator( bool aTrack ) { m_trackSeparator = aTrack; }
++
+     /**
+      * Return the current token text as a wxString, assuming that the input byte stream
+      * is UTF8 encoded.
+@@ -570,6 +582,7 @@ protected:
+     int                 curTok;                 ///< The current token obtained on last NextTok().
+     std::string         curText;                ///< The text of the current token.
+     std::string         curSeparator;           ///< The text of the separator preceeding the current text.
++    bool                m_trackSeparator = false; ///< See SetTrackSeparator.
+ 
+     const KEYWORD*      keywords;               ///< Table sorted by CMake for bsearch().
+     unsigned            keywordCount;           ///< Count of keywords table.
+diff --git a/pcbnew/drc/drc_rule_parser.cpp b/pcbnew/drc/drc_rule_parser.cpp
+index 3b8a9e8e..5e7dc0b1 100644
+--- a/pcbnew/drc/drc_rule_parser.cpp
++++ b/pcbnew/drc/drc_rule_parser.cpp
+@@ -38,6 +38,9 @@ DRC_RULES_PARSER::DRC_RULES_PARSER( const wxString& aSource, const wxString& aSo
+         m_tooRecent( false ),
+         m_reporter( nullptr )
+ {
++    // Only this parser reads CurSeparator(); enable the (now-opt-in)
++    // whitespace capture path in DSNLEXER::NextTok.
++    SetTrackSeparator( true );
+ }
+ 
+ 
+-- 
+2.39.5
+
