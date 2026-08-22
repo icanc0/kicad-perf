@@ -1,0 +1,34 @@
+From 18bb3da848d2439935ddb0c57d88ace0e3bca96f Mon Sep 17 00:00:00 2001
+From: icanc0 <ai7@vincentxie.net>
+Date: Sat, 22 Aug 2026 09:06:38 +0000
+Subject: [PATCH] P44: extend getBoardForExport to pcb render (3D raytrace)
+
+3D raytracer walks board outline + footprint 3D-model paths.
+Audited 3d-viewer/: no GetConnectivity / m_DRCEngine / component-class
+references. Safe to skip the full-init BOARD path.
+
+Wall clock: same ~1-2 s saved as 0003. Total pcb render time still
+dominated by the raytracer itself.
+---
+ pcbnew/pcbnew_jobs_handler.cpp | 5 ++++-
+ 1 file changed, 4 insertions(+), 1 deletion(-)
+
+diff --git a/pcbnew/pcbnew_jobs_handler.cpp b/pcbnew/pcbnew_jobs_handler.cpp
+index e3017f67..8926259a 100644
+--- a/pcbnew/pcbnew_jobs_handler.cpp
++++ b/pcbnew/pcbnew_jobs_handler.cpp
+@@ -1286,7 +1286,10 @@ int PCBNEW_JOBS_HANDLER::JobExportRender( JOB* aJob )
+         return CLI::EXIT_CODES::ERR_ARGS;
+     }
+ 
+-    BOARD* brd = getBoard( aRenderJob->m_filename );
++    // pcb render (3D raytrace) walks board outline + footprint 3D models.
++    // Audited 3d-viewer/ — no GetConnectivity, no m_DRCEngine, no
++    // component-class references.
++    BOARD* brd = getBoardForExport( aRenderJob->m_filename );
+ 
+     if( !brd )
+         return CLI::EXIT_CODES::ERR_INVALID_INPUT_FILE;
+-- 
+2.39.5
+

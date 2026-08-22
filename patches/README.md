@@ -48,6 +48,7 @@ Each patch is a `git format-patch` output — `git am` or `git apply` clean.
 | 41 | `0041-getboardforexport-stats-stackup-gencad.patch`                               | Same treatment for Stats, Stackup, and GenCAD exporters. All three walk geometry / stackup metadata only — none touch connectivity or DRC engine (verified). | ~1-2 s on big boards, same as 0003 | low |
 | 42 | `0042-getboardforexport-ipc2581-odb.patch`                                       | Same treatment for IPC-2581 and ODB++ exporters. Audited pcbnew/pcb_io/{ipc2581,odbpp}/ — zero GetConnectivity or m_DRCEngine references. | ~1-2 s on big boards, same as 0003 | low |
 | 43 | `0043-getboardforexport-3d-exporters.patch`                                       | All JobExportStep-routed formats (STEP, GLB, BREP, XAO, VRML, PLY, STL, STEPZ, U3D, 3D-PDF) walk board-outline geometry + footprint 3D model paths only. Audited pcbnew/exporters/step/: no connectivity/DRC/component-class deps. | ~1-2 s on big-board 3D export | medium — 3D path is complex; verify a sample STEP round-trips |
+| 44 | `0044-getboardforexport-pcb-render.patch`                                        | pcb render 3D raytrace also walks board outline + footprint 3D models only. Audited 3d-viewer/: no connectivity/DRC/component-class refs. | ~1-2 s off the fixed-init portion of pcb render | medium — same audit-required note as 0043 |
 
 ## Expected combined win (theoretical, not yet measured)
 
