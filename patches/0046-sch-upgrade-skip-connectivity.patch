@@ -1,0 +1,35 @@
+From 8a1b834e4bfad9f64d07a0c144c6119dd588d2df Mon Sep 17 00:00:00 2001
+From: icanc0 <ai7@vincentxie.net>
+Date: Sat, 22 Aug 2026 10:11:27 +0000
+Subject: [PATCH] =?UTF-8?q?P46:=20eeschema=20JobUpgrade=20=E2=80=94=20skip?=
+ =?UTF-8?q?=20ConnectionGraph::Recalculate=20on=20load?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The schema-upgrade path parses the .kicad_sch, then re-serializes to
+the current version. No downstream consumer reads the ConnectionGraph.
+Pass aCalculateConnectivity=false to skip it, same win as 0045.
+---
+ eeschema/eeschema_jobs_handler.cpp | 5 ++++-
+ 1 file changed, 4 insertions(+), 1 deletion(-)
+
+diff --git a/eeschema/eeschema_jobs_handler.cpp b/eeschema/eeschema_jobs_handler.cpp
+index ca90e5bd..5d3bc6b2 100644
+--- a/eeschema/eeschema_jobs_handler.cpp
++++ b/eeschema/eeschema_jobs_handler.cpp
+@@ -1438,7 +1438,10 @@ int EESCHEMA_JOBS_HANDLER::JobUpgrade( JOB* aJob )
+     if( aUpgradeJob == nullptr )
+         return CLI::EXIT_CODES::ERR_UNKNOWN;
+ 
+-    SCHEMATIC* sch = getSchematic( aUpgradeJob->m_filename );
++    // Upgrade just re-serializes the parsed model — no ConnectionGraph
++    // needed.
++    SCHEMATIC* sch = getSchematic( aUpgradeJob->m_filename,
++                                   /*aCalculateConnectivity=*/false );
+ 
+     if( !sch )
+         return CLI::EXIT_CODES::ERR_INVALID_INPUT_FILE;
+-- 
+2.39.5
+
