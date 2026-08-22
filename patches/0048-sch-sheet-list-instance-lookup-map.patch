@@ -1,0 +1,107 @@
+From 7b211f1e7f7dac8a298f4f02149c5a50be5e1305 Mon Sep 17 00:00:00 2001
+From: icanc0 <ai7@vincentxie.net>
+Date: Sat, 22 Aug 2026 14:28:00 +0000
+Subject: [PATCH] =?UTF-8?q?P48:=20SCH=5FSHEET=5FLIST::UpdateSymbol/SheetIn?=
+ =?UTF-8?q?stanceData=20=E2=80=94=20O(N=C2=B7M)=20=E2=86=92=20O(N=C2=B7log?=
+ =?UTF-8?q?=20M)?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Both update paths did std::find_if over the full instance vector for
+every sheet-path entry / every symbol. On a big hierarchical design
+with N and M in the thousands each, that's millions of comparisons
+on every schematic load.
+
+Build a std::map<KIID_PATH, instance*> up front (O(M·log M)), then
+O(log M) lookups per iteration. Total goes from O(N·M) to
+O(N·log M + M·log M). Correctness unchanged — same lookup key
+(KIID_PATH provides operator<), same fallback trace on miss.
+---
+ eeschema/sch_sheet_path.cpp | 35 +++++++++++++++++++++++------------
+ 1 file changed, 23 insertions(+), 12 deletions(-)
+
+diff --git a/eeschema/sch_sheet_path.cpp b/eeschema/sch_sheet_path.cpp
+index 68f1cf51..fb669c5e 100644
+--- a/eeschema/sch_sheet_path.cpp
++++ b/eeschema/sch_sheet_path.cpp
+@@ -1601,6 +1601,16 @@ SCH_SHEET_LIST SCH_SHEET_LIST::FindAllSheetsForScreen( const SCH_SCREEN* aScreen
+ void SCH_SHEET_LIST::UpdateSymbolInstanceData(
+                                 const std::vector<SCH_SYMBOL_INSTANCE>& aSymbolInstances )
+ {
++    // Perf: the old code did a std::find_if over aSymbolInstances for
++    // every symbol in every sheet — O(N·M) where N = symbol count,
++    // M = instance count. Both scale with hierarchy size on big
++    // designs, giving quadratic load time. Build a lookup table once
++    // and iterate O(N·log M) instead. std::map keyed on KIID_PATH
++    // (KIID_PATH already provides operator<).
++    std::map<KIID_PATH, const SCH_SYMBOL_INSTANCE*> byPath;
++    for( const SCH_SYMBOL_INSTANCE& inst : aSymbolInstances )
++        byPath.emplace( inst.m_Path, &inst );
++
+     for( SCH_SHEET_PATH& sheetPath : *this )
+     {
+         for( SCH_ITEM* item : sheetPath.LastScreen()->Items().OfType( SCH_SYMBOL_T ) )
+@@ -1612,19 +1622,17 @@ void SCH_SHEET_LIST::UpdateSymbolInstanceData(
+             KIID_PATH sheetPathWithSymbolUuid = sheetPath.Path();
+             sheetPathWithSymbolUuid.push_back( symbol->m_Uuid );
+ 
+-            auto it = std::find_if( aSymbolInstances.begin(), aSymbolInstances.end(),
+-                    [ sheetPathWithSymbolUuid ]( const SCH_SYMBOL_INSTANCE& r ) -> bool
+-                    {
+-                        return sheetPathWithSymbolUuid == r.m_Path;
+-                    } );
++            auto mapIt = byPath.find( sheetPathWithSymbolUuid );
+ 
+-            if( it == aSymbolInstances.end() )
++            if( mapIt == byPath.end() )
+             {
+                 wxLogTrace( traceSchSheetPaths, "No symbol instance found for symbol '%s'",
+                             sheetPathWithSymbolUuid.AsString() );
+                 continue;
+             }
+ 
++            const SCH_SYMBOL_INSTANCE* it = mapIt->second;
++
+             // Symbol instance paths are stored and looked up in memory with the root path so use
+             // the full path here.
+             symbol->AddHierarchicalReference( sheetPath.Path(), it->m_Reference, it->m_Unit );
+@@ -1644,6 +1652,11 @@ void SCH_SHEET_LIST::UpdateSymbolInstanceData(
+ 
+ void SCH_SHEET_LIST::UpdateSheetInstanceData( const std::vector<SCH_SHEET_INSTANCE>& aSheetInstances )
+ {
++    // Perf: same shape as UpdateSymbolInstanceData — old O(N·M)
++    // std::find_if per sheet. Precompute a lookup table.
++    std::map<KIID_PATH, const SCH_SHEET_INSTANCE*> byPath;
++    for( const SCH_SHEET_INSTANCE& inst : aSheetInstances )
++        byPath.emplace( inst.m_Path, &inst );
+ 
+     for( SCH_SHEET_PATH& path : *this )
+     {
+@@ -1651,19 +1664,17 @@ void SCH_SHEET_LIST::UpdateSheetInstanceData( const std::vector<SCH_SHEET_INSTAN
+ 
+         wxCHECK2( sheet && path.Last(), continue );
+ 
+-        auto it = std::find_if( aSheetInstances.begin(), aSheetInstances.end(),
+-                                [&path]( const SCH_SHEET_INSTANCE& r ) -> bool
+-                                {
+-                                    return path.Path() == r.m_Path;
+-                                } );
++        auto mapIt = byPath.find( path.Path() );
+ 
+-        if( it == aSheetInstances.end() )
++        if( mapIt == byPath.end() )
+         {
+             wxLogTrace( traceSchSheetPaths, "No sheet instance found for path '%s'",
+                         path.Path().AsString() );
+             continue;
+         }
+ 
++        const SCH_SHEET_INSTANCE* it = mapIt->second;
++
+         wxLogTrace( traceSchSheetPaths, "Setting sheet '%s' instance '%s' page number '%s'",
+                     ( sheet->GetName().IsEmpty() ) ? wxString( wxT( "root" ) ) : sheet->GetName(),
+                     path.Path().AsString(), it->m_PageNumber );
+-- 
+2.39.5
+
