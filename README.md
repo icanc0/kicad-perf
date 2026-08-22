@@ -16,13 +16,17 @@ scratch/      wire-protocol reference client, standalone test server, disposable
 
 ## Highlights
 
-- **`patches/`** — 15 patches (0001-0015) applied to KiCad master, all
-  `git format-patch` clean. See [`patches/README.md`](patches/README.md)
-  for the full table with expected wins and risk notes.
+- **`patches/`** — **46 patches (0001-0046)** applied to KiCad master,
+  all `git am` clean (see `benchmarks/04-apply-check.md`). See
+  [`patches/README.md`](patches/README.md) for the full table with
+  expected wins and risk notes, and
+  [`analysis/04-patch-index.md`](analysis/04-patch-index.md) for an
+  overview grouped by axis (startup, board init, plot throughput,
+  parser/lexer, daemon, hardening, correctness, schematic init).
 - **`docs/cli-daemon.md`** — quick start for the `kicad-cli daemon`
-  socket server (patches 0007-0015). Turns typical CI matrix builds
-  from 45 s to 2 s.
-- **`analysis/`** — three design docs:
+  socket server (patches 0007-0021). Turns typical CI matrix builds
+  from **~45 s → ~1.5 s** after the first invocation.
+- **`analysis/`** — five docs:
   - `00-hot-paths.md` — first-pass inventory of where kicad-cli
     burns time (structural review).
   - `01-board-load-init.md` — deep dive into
@@ -32,11 +36,18 @@ scratch/      wire-protocol reference client, standalone test server, disposable
   - `03-headless-pcbnew-kiface.md` — proposal for splitting
     `_pcbnew.kiface` into a smaller CLI-only kiface (~100-200 ms
     more per invocation).
-- **`benchmarks/00-baseline-kicad-9.0.8-aarch64.md`** — real
-  `hyperfine` + `strace` numbers on the stock 9.0.8 binary.
-- **`benchmarks/01-patch-syntax-check.md`** — `g++ -fsyntax-only`
-  proof that all six code-change patches compile clean against real
-  system headers.
+  - `04-patch-index.md` — the current-state overview of all 46
+    patches, grouped by axis.
+- **`benchmarks/`** — five docs:
+  - `00-baseline-kicad-9.0.8-aarch64.md` — `hyperfine` + `strace`
+    on the stock 9.0.8 binary.
+  - `01-patch-syntax-check.md` — `g++ -fsyntax-only` proof that
+    every code-change patch parses against real system headers.
+  - `02-validation-plan.md` — per-patch hyperfine + bit-compare
+    recipes for the eventual runtime pass.
+  - `03-build-blocker-notes.md` — what stops the full-tree build
+    in userspace right now (cmake wxWidgets detection).
+  - `04-apply-check.md` — `git am`-clean confirmation on all 46.
 
 ## Reference renderers cloned under `../kicad-references/`
 
