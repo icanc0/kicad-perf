@@ -1,0 +1,43 @@
+From 9e78f6ea04633bd77184313da41f7ed0805f1f6d Mon Sep 17 00:00:00 2001
+From: icanc0 <ai7@vincentxie.net>
+Date: Sat, 22 Aug 2026 03:44:55 +0000
+Subject: [PATCH] =?UTF-8?q?P35:=20drc=5Fengine=20loadRules=20=E2=80=94=20r?=
+ =?UTF-8?q?eserve=20+=20move-append=20instead=20of=20copy-push=5Fback?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Micro but clean: N-1 vector reallocs on a rules file with many rules
+were happening because m_rules.push_back grew geometrically without a
+reserve. Also the loop was pushing by copy — each push_back atomic-bumped
+the shared_ptr refcount, then destroyed the source copy in the local
+vector, atomic-decrementing it. Move-append avoids both atomics.
+
+Trivial correctness: rules vector goes out of scope at the end of
+loadRules, so std::move'ing out is fine.
+---
+ pcbnew/drc/drc_engine.cpp | 7 ++++++-
+ 1 file changed, 6 insertions(+), 1 deletion(-)
+
+diff --git a/pcbnew/drc/drc_engine.cpp b/pcbnew/drc/drc_engine.cpp
+index c0251fae..63e10f0f 100644
+--- a/pcbnew/drc/drc_engine.cpp
++++ b/pcbnew/drc/drc_engine.cpp
+@@ -705,8 +705,13 @@ void DRC_ENGINE::loadRules( const wxFileName& aPath )
+         // Copy the rules into the member variable afterwards so that if Parse() throws then
+         // the possibly malformed rules won't contaminate the current ruleset.
+ 
++        // Bulk-move: reserve once, then move each shared_ptr out of the
++        // local vector into m_rules. Saves N-1 vector reallocs on a
++        // rules file with many rules and avoids the atomic refcount
++        // bump that plain push_back(rule) does on a copy.
++        m_rules.reserve( m_rules.size() + rules.size() );
+         for( std::shared_ptr<DRC_RULE>& rule : rules )
+-            m_rules.push_back( rule );
++            m_rules.push_back( std::move( rule ) );
+     }
+ }
+ 
+-- 
+2.39.5
+
