@@ -1,0 +1,52 @@
+From d14a399702facc28fc64fe2e83488384ffa9df70 Mon Sep 17 00:00:00 2001
+From: icanc0 <ai7@vincentxie.net>
+Date: Sat, 22 Aug 2026 06:58:33 +0000
+Subject: [PATCH] P40: extend getBoardForExport to IPC-D-356 + position-file
+ exporters
+
+Patch 0003 gave the export-only fast board load path to
+SVG/PDF/PNG/DXF/PS/Gerbers/Drill. Two more exporters that were still
+on the full-init getBoard() but read only geometry:
+
+- IPC-D-356 (test-point netlist): walks pads/vias, writes (net, pos,
+  drill). Reads GetNetname() from per-item NETINFO_ITEM; connectivity
+  graph not consulted.
+- Position file: iterates footprints, writes ref/value/pos/rot.
+
+Same expected win as 0003 on big boards (~1-2 s).
+---
+ pcbnew/pcbnew_jobs_handler.cpp | 11 +++++++++--
+ 1 file changed, 9 insertions(+), 2 deletions(-)
+
+diff --git a/pcbnew/pcbnew_jobs_handler.cpp b/pcbnew/pcbnew_jobs_handler.cpp
+index 297b35ad..c7b693ad 100644
+--- a/pcbnew/pcbnew_jobs_handler.cpp
++++ b/pcbnew/pcbnew_jobs_handler.cpp
+@@ -2665,7 +2665,10 @@ int PCBNEW_JOBS_HANDLER::JobExportPos( JOB* aJob )
+     if( aPosJob == nullptr )
+         return CLI::EXIT_CODES::ERR_UNKNOWN;
+ 
+-    BOARD* brd = getBoard( aPosJob->m_filename );
++    // Pick-and-place position file: iterates footprints and writes their
++    // ref/value/pos/rotation. No connectivity or DRC needed. Same story
++    // as drill/plot.
++    BOARD* brd = getBoardForExport( aPosJob->m_filename );
+ 
+     if( !brd )
+         return CLI::EXIT_CODES::ERR_INVALID_INPUT_FILE;
+@@ -3341,7 +3344,11 @@ int PCBNEW_JOBS_HANDLER::JobExportIpcD356( JOB* aJob )
+     if( job == nullptr )
+         return CLI::EXIT_CODES::ERR_UNKNOWN;
+ 
+-    BOARD* brd = getBoard( job->m_filename );
++    // IPC-D-356 walks pads/vias and outputs their (net-code, position, drill
++    // size). Net names come from per-item NETINFO_ITEMs — no connectivity
++    // graph needed. Same story as drill/plot: patch 0003's export-only
++    // load path is safe.
++    BOARD* brd = getBoardForExport( job->m_filename );
+ 
+     if( !brd )
+         return CLI::EXIT_CODES::ERR_INVALID_INPUT_FILE;
+-- 
+2.39.5
+
