@@ -1,0 +1,93 @@
+From 834d1a569af5403a95996d4d10972be5dfca7f0e Mon Sep 17 00:00:00 2001
+From: icanc0 <ai7@vincentxie.net>
+Date: Sat, 22 Aug 2026 04:50:01 +0000
+Subject: [PATCH] =?UTF-8?q?P37:=20API=5FPLUGIN=5FMANAGER=20=E2=80=94=20laz?=
+ =?UTF-8?q?y-load=20api.v1.schema.json=20out=20of=20ctor?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+PGM_BASE::InitPgm constructs API_PLUGIN_MANAGER at every startup. The
+ctor parsed api.v1.schema.json into a JSON_SCHEMA_VALIDATOR — dozens
+of ms of JSON parse work, plus the '/usr/share/kicad/schemas/…: file
+not found' stderr warning when running from a non-standard prefix
+(anyone using an AppImage, portable build, or the kicad-perf
+extracted-deb setup).
+
+Move the schema construction into a new private ensureSchemaLoaded()
+that ReloadPlugins() calls first. kicad-cli constructs the manager
+but never calls ReloadPlugins, so it never pays.
+
+The schema is still constructed when actually needed: GUI users
+invoking plugin reload from the toolbar, the QA api-plugin tests,
+and PGM_BASE::InitPgm's early ReloadPlugins call when
+common_settings.api.enable_server is true.
+---
+ common/api/api_plugin_manager.cpp | 23 ++++++++++++++++++++---
+ include/api/api_plugin_manager.h  |  4 ++++
+ 2 files changed, 24 insertions(+), 3 deletions(-)
+
+diff --git a/common/api/api_plugin_manager.cpp b/common/api/api_plugin_manager.cpp
+index 2fa9937f..0e922e5d 100644
+--- a/common/api/api_plugin_manager.cpp
++++ b/common/api/api_plugin_manager.cpp
+@@ -135,14 +135,27 @@ API_PLUGIN_MANAGER::API_PLUGIN_MANAGER( wxEvtHandler* aEvtHandler ) :
+         m_lastPid( 0 ),
+         m_raiseTimer( nullptr )
+ {
+-    // Read and store pcm schema
++    // Perf: schema construction moved to ensureSchemaLoaded(), lazily
++    // triggered from ReloadPlugins(). It parses the api.v1.schema.json
++    // (dozens of ms), and kicad-cli constructs this object at startup
++    // but never calls ReloadPlugins. Deferring makes headless startup
++    // skip the JSON parse and its 'schemas/api.v1.schema.json not found'
++    // stderr warning entirely.
++
++    Bind( EDA_EVT_PLUGIN_MANAGER_JOB_FINISHED, &API_PLUGIN_MANAGER::processNextJob, this );
++}
++
++
++void API_PLUGIN_MANAGER::ensureSchemaLoaded()
++{
++    if( m_schema_validator )
++        return;
++
+     wxFileName schemaFile( PATHS::GetStockDataPath( true ), wxS( "api.v1.schema.json" ) );
+     schemaFile.Normalize( FN_NORMALIZE_FLAGS | wxPATH_NORM_ENV_VARS );
+     schemaFile.AppendDir( wxS( "schemas" ) );
+ 
+     m_schema_validator = std::make_unique<JSON_SCHEMA_VALIDATOR>( schemaFile );
+-
+-    Bind( EDA_EVT_PLUGIN_MANAGER_JOB_FINISHED, &API_PLUGIN_MANAGER::processNextJob, this );
+ }
+ 
+ 
+@@ -177,6 +190,10 @@ public:
+ void API_PLUGIN_MANAGER::ReloadPlugins( std::optional<wxString> aDirectoryToScan,
+                                         std::shared_ptr<REPORTER> aReporter )
+ {
++    // Lazy: schema validator was deferred out of the ctor for headless
++    // startup speed. Materialise it here, on first plugin load.
++    ensureSchemaLoaded();
++
+     m_reloadReporter = std::move( aReporter );
+ 
+     m_plugins.clear();
+diff --git a/include/api/api_plugin_manager.h b/include/api/api_plugin_manager.h
+index 6ac13429..9ddba82a 100644
+--- a/include/api/api_plugin_manager.h
++++ b/include/api/api_plugin_manager.h
+@@ -90,6 +90,10 @@ private:
+ 
+     void processNextJob( wxCommandEvent& aEvent );
+ 
++    /// Lazy-load the api.v1.schema.json validator (deferred out of ctor
++    /// so headless startup pays no schema-parse cost).
++    void ensureSchemaLoaded();
++
+     int doInvokeAction( const wxString& aIdentifier, std::vector<wxString> aExtraArgs,
+                         bool aSync = false, wxString* aStdout = nullptr,
+                         wxString* aStderr = nullptr,
+-- 
+2.39.5
+
