@@ -46,6 +46,7 @@ Each patch is a `git format-patch` output — `git am` or `git apply` clean.
 | 39 | `0039-minimal-image-handlers-in-headless.patch`                                   | `wxInitAllImageHandlers()` registers 11+ image codecs (GIF, TIFF, TGA, XPM, PCX, PNM, IFF, ANI, ICO, PICT, XBM …). Headless kicad-cli only reads/writes PNG/JPEG (embedded, pcb render) and BMP (bitmap2component). Register just the three in headless. | small per-startup + smaller RSS | trivial |
 | 40 | `0040-getboardforexport-ipcd356-pos.patch`                                        | Extend 0003's export-only board load path to two more read-only-over-geometry exporters that still used full-init `getBoard()`: IPC-D-356 test-point netlist, position file. | ~1-2 s on big boards, same as 0003 | low |
 | 41 | `0041-getboardforexport-stats-stackup-gencad.patch`                               | Same treatment for Stats, Stackup, and GenCAD exporters. All three walk geometry / stackup metadata only — none touch connectivity or DRC engine (verified). | ~1-2 s on big boards, same as 0003 | low |
+| 42 | `0042-getboardforexport-ipc2581-odb.patch`                                       | Same treatment for IPC-2581 and ODB++ exporters. Audited pcbnew/pcb_io/{ipc2581,odbpp}/ — zero GetConnectivity or m_DRCEngine references. | ~1-2 s on big boards, same as 0003 | low |
 
 ## Expected combined win (theoretical, not yet measured)
 

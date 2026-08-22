@@ -1,0 +1,49 @@
+From 8b40b84f08bd8b48ffe85e3f6ac6d7045617cd61 Mon Sep 17 00:00:00 2001
+From: icanc0 <ai7@vincentxie.net>
+Date: Sat, 22 Aug 2026 08:02:59 +0000
+Subject: [PATCH] P42: extend getBoardForExport to IPC-2581 and ODB++ exporters
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Audited pcbnew/pcb_io/{ipc2581,odbpp}/ — no GetConnectivity or
+m_DRCEngine references. Both writers walk item collections + stackup
+metadata, using per-item NETINFO_ITEMs for net names.
+
+Convert both to the fast board-load path. Same expected win as 0003
+on big boards (~1-2 s).
+---
+ pcbnew/pcbnew_jobs_handler.cpp | 10 ++++++++--
+ 1 file changed, 8 insertions(+), 2 deletions(-)
+
+diff --git a/pcbnew/pcbnew_jobs_handler.cpp b/pcbnew/pcbnew_jobs_handler.cpp
+index fb2cad9f..460c7564 100644
+--- a/pcbnew/pcbnew_jobs_handler.cpp
++++ b/pcbnew/pcbnew_jobs_handler.cpp
+@@ -3315,7 +3315,10 @@ int PCBNEW_JOBS_HANDLER::JobExportIpc2581( JOB* aJob )
+     if( job == nullptr )
+         return CLI::EXIT_CODES::ERR_UNKNOWN;
+ 
+-    BOARD* brd = getBoard( job->m_filename );
++    // IPC-2581 writer walks board items + stackup metadata. Audited:
++    // no GetConnectivity or DRCEngine references anywhere under
++    // pcbnew/pcb_io/ipc2581/ — net names come from per-item NETINFO_ITEMs.
++    BOARD* brd = getBoardForExport( job->m_filename );
+ 
+     if( !brd )
+         return CLI::EXIT_CODES::ERR_INVALID_INPUT_FILE;
+@@ -3404,7 +3407,10 @@ int PCBNEW_JOBS_HANDLER::JobExportOdb( JOB* aJob )
+     if( job == nullptr )
+         return CLI::EXIT_CODES::ERR_UNKNOWN;
+ 
+-    BOARD* brd = getBoard( job->m_filename );
++    // ODB++ writer walks board items into per-file archive entries.
++    // Audited: no GetConnectivity or DRCEngine references under
++    // pcbnew/pcb_io/odbpp/.
++    BOARD* brd = getBoardForExport( job->m_filename );
+ 
+     if( !brd )
+         return CLI::EXIT_CODES::ERR_INVALID_INPUT_FILE;
+-- 
+2.39.5
+
