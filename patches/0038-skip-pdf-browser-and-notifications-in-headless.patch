@@ -1,0 +1,49 @@
+From 5566d6b9a56854590b8cc7e4329dc216e535544e Mon Sep 17 00:00:00 2001
+From: icanc0 <ai7@vincentxie.net>
+Date: Sat, 22 Aug 2026 05:22:11 +0000
+Subject: [PATCH] =?UTF-8?q?P38:=20pgm=5Fbase=20=E2=80=94=20skip=20ReadPdfB?=
+ =?UTF-8?q?rowserInfos=20+=20NotificationsManager::Load=20in=20headless?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Two more GUI-only init calls in PGM_BASE::InitPgm that headless
+kicad-cli was paying for:
+
+- ReadPdfBrowserInfos: probes for available PDF viewers so the GUI's
+  'Open in PDF viewer' menu items know what to offer.
+- NotificationsManager::Load: reads on-disk notification-history
+  JSON to populate the notifications panel widget.
+
+Both are unused by kicad-cli. Guard on !aHeadless. GUI apps are
+unaffected.
+---
+ common/pgm_base.cpp | 11 +++++++++--
+ 1 file changed, 9 insertions(+), 2 deletions(-)
+
+diff --git a/common/pgm_base.cpp b/common/pgm_base.cpp
+index da390ff2..fc14ed0b 100644
+--- a/common/pgm_base.cpp
++++ b/common/pgm_base.cpp
+@@ -490,9 +490,16 @@ bool PGM_BASE::InitPgm( bool aHeadless, bool aIsUnitTest )
+ 
+     loadCommonSettings();
+ 
+-    ReadPdfBrowserInfos();      // needs GetCommonSettings()
++    // ReadPdfBrowserInfos is only useful for the GUI (used to launch a
++    // PDF viewer from the eeschema/pcbnew menus). Skip in headless.
++    if( !aHeadless )
++        ReadPdfBrowserInfos();      // needs GetCommonSettings()
+ 
+-    GetNotificationsManager().Load();
++    // Notifications are strictly GUI (populated into the notifications
++    // panel widget). Load parses the on-disk JSON list every time; skip
++    // the file open + parse in headless.
++    if( !aHeadless )
++        GetNotificationsManager().Load();
+ 
+     // TODO(JE): Remove this if apps are refactored to not assume Prj() always works
+     // Need to create a project early for now (it can have an empty path for the moment)
+-- 
+2.39.5
+
