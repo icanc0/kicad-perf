@@ -1,0 +1,53 @@
+From 80609f8beb565ca2d46c0fad26f183bc80c435c9 Mon Sep 17 00:00:00 2001
+From: icanc0 <ai7@vincentxie.net>
+Date: Sat, 22 Aug 2026 19:13:58 +0000
+Subject: [PATCH] =?UTF-8?q?P51:=20SCH=5FSHEET=5FLIST::AnnotatePowerSymbols?=
+ =?UTF-8?q?=20=E2=80=94=20fix=20dead-code=20&&=20vs=20||=20guard?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Line was 'curr_ref.Last() < 0 && curr_ref.Last() > 9' — no character
+can be simultaneously less than '0' and greater than '9', so the
+'skip unannotated refs' fast-path never triggered.
+
+Behaviour is unchanged today: an unannotated ref has no trailing
+digits to strip, so the loop that runs after the dead-code guard is
+a no-op on those refs. But the guard was intended to save that
+work AND clarify intent — the || form does both.
+
+Same shape as P34 (courtyard-constraint typo): harmless-today
+copy/paste bug that would silently break if the surrounding logic
+ever tightened up.
+---
+ eeschema/sch_sheet_path.cpp | 14 ++++++++++++--
+ 1 file changed, 12 insertions(+), 2 deletions(-)
+
+diff --git a/eeschema/sch_sheet_path.cpp b/eeschema/sch_sheet_path.cpp
+index fb669c5e..138ba689 100644
+--- a/eeschema/sch_sheet_path.cpp
++++ b/eeschema/sch_sheet_path.cpp
+@@ -1422,8 +1422,18 @@ void SCH_SHEET_LIST::AnnotatePowerSymbols()
+             continue;
+         }
+ 
+-        // Possible duplicate, if the ref ends by a number:
+-        if( curr_ref.Last() < '0' && curr_ref.Last() > '9' )
++        // Possible duplicate, if the ref ends by a number.
++        //
++        // Bug fix: this used to read
++        //     curr_ref.Last() < '0' && curr_ref.Last() > '9'
++        // which is impossible (a char cannot be both < '0' and > '9')
++        // so the guard was dead code and the intended "skip
++        // unannotated refs" fast-path never triggered. The digit-strip
++        // loop below then ran on the un-annotated ref, but because
++        // there were no trailing digits to strip it was a functional
++        // no-op — so the behaviour is unchanged, only the intent is
++        // now correctly expressed. The right operator is ||.
++        if( curr_ref.Last() < '0' || curr_ref.Last() > '9' )
+             continue;   // not annotated
+ 
+         // Duplicate: clear annotation by removing the number ending the ref
+-- 
+2.39.5
+
