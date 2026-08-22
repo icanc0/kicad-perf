@@ -1,0 +1,44 @@
+From e639f73f645f5ebb5d6d7b466ebcb63537ee537e Mon Sep 17 00:00:00 2001
+From: icanc0 <ai7@vincentxie.net>
+Date: Sat, 22 Aug 2026 04:17:25 +0000
+Subject: [PATCH] =?UTF-8?q?P36:=20pgm=5Fbase=20=E2=80=94=20skip=20FindPyth?=
+ =?UTF-8?q?onInterpreter=20in=20headless=20(kicad-cli)=20mode?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+PGM_BASE::InitPgm always tried to find a Python interpreter when the
+user hadn't cached one, calling PYTHON_MANAGER::FindPythonInterpreter
+which does up to three synchronous wxExecute() fork/exec calls
+('which -a python3', 'which -a python'). ~10-30 ms wasted per startup.
+
+kicad-cli almost never uses the Python API plugin runner. Guard on
+!aHeadless. GUI users are unaffected.
+---
+ common/pgm_base.cpp | 10 ++++++++--
+ 1 file changed, 8 insertions(+), 2 deletions(-)
+
+diff --git a/common/pgm_base.cpp b/common/pgm_base.cpp
+index 531b47d2..da390ff2 100644
+--- a/common/pgm_base.cpp
++++ b/common/pgm_base.cpp
+@@ -470,8 +470,14 @@ bool PGM_BASE::InitPgm( bool aHeadless, bool aIsUnitTest )
+     // Load common settings from disk after setting up env vars
+     GetSettingsManager().Load( commonSettings );
+ 
+-    // If user doesn't have a saved Python interpreter, try (potentially again) to find one
+-    if( commonSettings->m_Api.python_interpreter.IsEmpty() )
++    // If user doesn't have a saved Python interpreter, try (potentially
++    // again) to find one — but only in GUI mode. FindPythonInterpreter
++    // does up to three synchronous `wxExecute(which -a python3)` fork/exec
++    // calls, which costs 10-30 ms on every startup for a feature (API
++    // plugin runner) that kicad-cli almost never uses. If a CLI user
++    // does want plugins, the GUI will find the interpreter on their
++    // first GUI launch and cache it into common settings.
++    if( !aHeadless && commonSettings->m_Api.python_interpreter.IsEmpty() )
+         commonSettings->m_Api.python_interpreter = PYTHON_MANAGER::FindPythonInterpreter();
+ 
+     // Init user language *before* calling loadSettings, because
+-- 
+2.39.5
+
