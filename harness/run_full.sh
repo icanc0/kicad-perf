@@ -62,7 +62,7 @@ echo
 cd "$HARNESS"
 python3 runner.py \
     --binaries "$BINS" \
-    --scenarios cli_version \
+    --scenarios cli_version,cli_svg_export \
     --runs "$RUNS"
 
 echo
