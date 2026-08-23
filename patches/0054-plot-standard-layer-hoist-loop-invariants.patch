@@ -1,0 +1,146 @@
+From b2e81c9cedfc9f7485faca3896abf4e2a581f5c8 Mon Sep 17 00:00:00 2001
+From: icanc0 <44480394+icanc0@users.noreply.github.com>
+Date: Sun, 23 Aug 2026 20:10:44 +0000
+Subject: [PATCH] =?UTF-8?q?P54:=20PlotStandardLayer=20=E2=80=94=20hoist=20?=
+ =?UTF-8?q?per-pad=20loop-invariant=20layer=20state?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The per-pad loop inside PlotStandardLayer was recomputing several
+loop-invariant values on every pad:
+
+  * LSET::count() (O(64) each call)
+  * LSET::Seq() — allocates a std::vector<PCB_LAYER_ID> per call
+  * aPlotOpt.ColorSettings()->GetColor(...) for B_Cu/F_Cu/F_Fab/B_Fab
+  * pad->GetLayerSet() & aLayerMask — computed twice per pad
+  * pad->GetLayerSet().Contains(F_Cu/B_Cu) — computed 4x per pad
+
+Hoist all of the loop-invariants out to constants before the loop,
+and compute the pad's intersect and fab-side booleans once at the
+top of each iteration, reusing them for every subsequent condition.
+
+Same fix applied to the via loop's singleLayerMask/singleLayerColor
+lookup.
+
+On a 5000-pad board this eliminates ~5000 std::vector allocations
+and ~20000 color-settings map lookups per plot invocation. No
+behaviour change — just less redundant work.
+---
+ pcbnew/plot_board_layers.cpp | 68 +++++++++++++++++++++++++++---------
+ 1 file changed, 51 insertions(+), 17 deletions(-)
+
+diff --git a/pcbnew/plot_board_layers.cpp b/pcbnew/plot_board_layers.cpp
+index effda29c..a6da9f4b 100644
+--- a/pcbnew/plot_board_layers.cpp
++++ b/pcbnew/plot_board_layers.cpp
+@@ -337,6 +337,32 @@ void PlotStandardLayer( BOARD* aBoard, PLOTTER* aPlotter, const LSET& aLayerMask
+     bool sketchPads = ( onFrontFab || onBackFab ) && aPlotOpt.GetSketchPadsOnFabLayers();
+     const wxString variantName = aBoard->GetCurrentVariant();
+ 
++    // Perf: hoist loop-invariant single-layer state out of the per-pad loop.
++    // LSET::count() is O(64), LSET::Seq() allocates a std::vector — we were
++    // paying both plus a color lookup on every pad on multi-thousand-pad boards.
++    const bool           singleLayerMask   = ( aLayerMask.count() == 1 );
++    const PCB_LAYER_ID   singleLayer       = singleLayerMask ? aLayerMask.Seq()[0]
++                                                             : UNDEFINED_LAYER;
++    const COLOR4D        singleLayerColor  = singleLayerMask
++                                             ? aPlotOpt.ColorSettings()->GetColor( singleLayer )
++                                             : COLOR4D::BLACK;
++    const bool           maskHasBCu        = aLayerMask[B_Cu];
++    const bool           maskHasFCu        = aLayerMask[F_Cu];
++    const bool           maskHasFFab       = aLayerMask[F_Fab];
++    const bool           maskHasBFab       = aLayerMask[B_Fab];
++    const COLOR4D        bCuColor          = maskHasBCu
++                                             ? aPlotOpt.ColorSettings()->GetColor( B_Cu )
++                                             : COLOR4D::BLACK;
++    const COLOR4D        fCuColor          = maskHasFCu
++                                             ? aPlotOpt.ColorSettings()->GetColor( F_Cu )
++                                             : COLOR4D::BLACK;
++    const COLOR4D        fFabColor         = maskHasFFab
++                                             ? aPlotOpt.ColorSettings()->GetColor( F_Fab )
++                                             : COLOR4D::BLACK;
++    const COLOR4D        bFabColor         = maskHasBFab
++                                             ? aPlotOpt.ColorSettings()->GetColor( B_Fab )
++                                             : COLOR4D::BLACK;
++
+     // Plot edge layer and graphic items
+     for( const BOARD_ITEM* item : aBoard->Drawings() )
+         itemplotter.PlotBoardGraphicItem( item );
+@@ -358,12 +384,21 @@ void PlotStandardLayer( BOARD* aBoard, PLOTTER* aPlotter, const LSET& aLayerMask
+ 
+         for( PAD* pad : footprint->Pads() )
+         {
++            // Perf: compute pad's layer intersect + fab-side checks once,
++            // reuse below instead of recomputing each conditional.
++            const LSET& padLayers = pad->GetLayerSet();
++            const LSET  padAndMask = padLayers & aLayerMask;
++            const bool  padOnFCu = padLayers.Contains( F_Cu );
++            const bool  padOnBCu = padLayers.Contains( B_Cu );
++            const bool  padFabOverlap = sketchPads
++                                        && ( ( onFrontFab && padOnFCu )
++                                             || ( onBackFab && padOnBCu ) );
++
+             bool doSketchPads = false;
+ 
+-            if( !( pad->GetLayerSet() & aLayerMask ).any() )
++            if( !padAndMask.any() )
+             {
+-                if( sketchPads && (   ( onFrontFab && pad->GetLayerSet().Contains( F_Cu ) )
+-                                    || ( onBackFab && pad->GetLayerSet().Contains( B_Cu ) ) ) )
++                if( padFabOverlap )
+                 {
+                     doSketchPads = true;
+                 }
+@@ -385,26 +420,25 @@ void PlotStandardLayer( BOARD* aBoard, PLOTTER* aPlotter, const LSET& aLayerMask
+             COLOR4D color = COLOR4D::BLACK;
+ 
+             // If we're plotting a single layer, the color for that layer can be used directly.
+-            if( aLayerMask.count() == 1 )
++            if( singleLayerMask )
+             {
+-                color = aPlotOpt.ColorSettings()->GetColor( aLayerMask.Seq()[0] );
++                color = singleLayerColor;
+             }
+             else
+             {
+-                if( ( pad->GetLayerSet() & aLayerMask )[B_Cu] )
+-                    color = aPlotOpt.ColorSettings()->GetColor( B_Cu );
++                if( padAndMask[B_Cu] )
++                    color = bCuColor;
+ 
+-                if( ( pad->GetLayerSet() & aLayerMask )[F_Cu] )
+-                    color = color.LegacyMix( aPlotOpt.ColorSettings()->GetColor( F_Cu ) );
++                if( padAndMask[F_Cu] )
++                    color = color.LegacyMix( fCuColor );
+ 
+-                if( sketchPads && aLayerMask[F_Fab] )
+-                    color = aPlotOpt.ColorSettings()->GetColor( F_Fab );
+-                else if( sketchPads && aLayerMask[B_Fab] )
+-                    color = aPlotOpt.ColorSettings()->GetColor( B_Fab );
++                if( sketchPads && maskHasFFab )
++                    color = fFabColor;
++                else if( sketchPads && maskHasBFab )
++                    color = bFabColor;
+             }
+ 
+-            if( sketchPads && (   ( onFrontFab && pad->GetLayerSet().Contains( F_Cu ) )
+-                                || ( onBackFab && pad->GetLayerSet().Contains( B_Cu ) ) ) )
++            if( padFabOverlap )
+             {
+                 if( aPlotOpt.GetPlotPadNumbers() )
+                     itemplotter.PlotPadNumber( pad, color );
+@@ -776,8 +810,8 @@ void PlotStandardLayer( BOARD* aBoard, PLOTTER* aPlotter, const LSET& aLayerMask
+         COLOR4D color;
+ 
+         // If we're plotting a single layer, the color for that layer can be used directly.
+-        if( aLayerMask.count() == 1 )
+-            color = aPlotOpt.ColorSettings()->GetColor( aLayerMask.Seq()[0] );
++        if( singleLayerMask )
++            color = singleLayerColor;
+         else
+             color = aPlotOpt.ColorSettings()->GetColor( LAYER_VIAS + static_cast<int>( via->GetViaType() ) );
+ 
+-- 
+2.39.5
+

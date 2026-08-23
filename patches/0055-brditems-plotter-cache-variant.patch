@@ -1,0 +1,103 @@
+From bebbafd79304e4f540d1f620d24894b9fb3dd73f Mon Sep 17 00:00:00 2001
+From: icanc0 <44480394+icanc0@users.noreply.github.com>
+Date: Sun, 23 Aug 2026 20:12:27 +0000
+Subject: [PATCH] =?UTF-8?q?P55:=20BRDITEMS=5FPLOTTER=20=E2=80=94=20cache?=
+ =?UTF-8?q?=20variant=20name=20at=20construction?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+BOARD::GetCurrentVariant() returns wxString by value (copy per call).
+Three plot-methods on BRDITEMS_PLOTTER re-fetched it per footprint:
+PlotFootprintTextItems (line 393), PlotFootprintGraphicItems (line
+654), and PlotPad (line 944). On a 5000-footprint board that's
+~15,000 wxString allocations per plot.
+
+Move the fetch into the constructor into a new m_variantName member.
+Callers reference &m_variantName so no additional copy is made.
+
+Behaviour-preserving; the variant is stable during plot.
+---
+ pcbnew/pcbplot.h                 | 10 +++++-----
+ pcbnew/plot_brditems_plotter.cpp | 16 +++++++++++++---
+ 2 files changed, 18 insertions(+), 8 deletions(-)
+
+diff --git a/pcbnew/pcbplot.h b/pcbnew/pcbplot.h
+index d5833940..35c745be 100644
+--- a/pcbnew/pcbplot.h
++++ b/pcbnew/pcbplot.h
+@@ -60,11 +60,7 @@ class METRICS;
+ class BRDITEMS_PLOTTER : public PCB_PLOT_PARAMS
+ {
+ public:
+-    BRDITEMS_PLOTTER( PLOTTER* aPlotter, BOARD* aBoard, const PCB_PLOT_PARAMS& aPlotOpts ) :
+-            PCB_PLOT_PARAMS( aPlotOpts ),
+-            m_plotter( aPlotter ),
+-            m_board( aBoard )
+-    { }
++    BRDITEMS_PLOTTER( PLOTTER* aPlotter, BOARD* aBoard, const PCB_PLOT_PARAMS& aPlotOpts );
+ 
+     /**
+      * @return a 'width adjustment' for the postscript engine
+@@ -150,6 +146,10 @@ private:
+     PLOTTER*  m_plotter;
+     BOARD*    m_board;
+     LSET      m_layerMask;
++    // Perf: cache the board's current variant name once at construction — the
++    // getter returns wxString by value, and PlotFootprintTextItems/Graphics
++    // used to fetch it per-footprint.
++    wxString  m_variantName;
+ };
+ 
+ 
+diff --git a/pcbnew/plot_brditems_plotter.cpp b/pcbnew/plot_brditems_plotter.cpp
+index 27113833..f5b25bd8 100644
+--- a/pcbnew/plot_brditems_plotter.cpp
++++ b/pcbnew/plot_brditems_plotter.cpp
+@@ -63,6 +63,16 @@
+ #include <wx/debug.h>                         // for wxASSERT_MSG
+ 
+ 
++BRDITEMS_PLOTTER::BRDITEMS_PLOTTER( PLOTTER* aPlotter, BOARD* aBoard,
++                                    const PCB_PLOT_PARAMS& aPlotOpts ) :
++        PCB_PLOT_PARAMS( aPlotOpts ),
++        m_plotter( aPlotter ),
++        m_board( aBoard ),
++        m_variantName( aBoard ? aBoard->GetCurrentVariant() : wxString() )
++{
++}
++
++
+ COLOR4D BRDITEMS_PLOTTER::getColor( int aLayer ) const
+ {
+     COLOR4D color = ColorSettings()->GetColor( aLayer );
+@@ -390,7 +400,7 @@ void BRDITEMS_PLOTTER::PlotFootprintTextItems( const FOOTPRINT* aFootprint )
+     if( !GetPlotFPText() )
+         return;
+ 
+-    const wxString variantName = m_board ? m_board->GetCurrentVariant() : wxString();
++    const wxString& variantName = m_variantName;
+     const bool     dnp = aFootprint->GetDNPForVariant( variantName );
+ 
+     const PCB_TEXT* reference = &aFootprint->Reference();
+@@ -651,7 +661,7 @@ void BRDITEMS_PLOTTER::PlotPcbTarget( const PCB_TARGET* aMire )
+ 
+ void BRDITEMS_PLOTTER::PlotFootprintGraphicItems( const FOOTPRINT* aFootprint )
+ {
+-    const wxString variantName = m_board ? m_board->GetCurrentVariant() : wxString();
++    const wxString& variantName = m_variantName;
+     const bool     dnp = aFootprint->GetDNPForVariant( variantName );
+ 
+     for( const BOARD_ITEM* item : aFootprint->GraphicalItems() )
+@@ -941,7 +951,7 @@ void BRDITEMS_PLOTTER::PlotShape( const PCB_SHAPE* aShape )
+ 
+     const FOOTPRINT* parentFP = aShape->GetParentFootprint();
+     GBR_METADATA     gbr_metadata;
+-    const wxString   variantName = m_board ? m_board->GetCurrentVariant() : wxString();
++    const wxString&  variantName = m_variantName;
+     const bool       parentDnp = parentFP ? parentFP->GetDNPForVariant( variantName ) : false;
+ 
+     if( parentFP )
+-- 
+2.39.5
+

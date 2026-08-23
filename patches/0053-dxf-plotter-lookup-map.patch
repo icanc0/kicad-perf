@@ -1,0 +1,106 @@
+From 6acb1d0ff092a6fac1d86fbd176a84ca141f7198 Mon Sep 17 00:00:00 2001
+From: icanc0 <44480394+icanc0@users.noreply.github.com>
+Date: Sun, 23 Aug 2026 20:07:50 +0000
+Subject: [PATCH 2/2] =?UTF-8?q?P53:=20DXF=5FPLOTTER=20=E2=80=94=20O(1)=20l?=
+ =?UTF-8?q?ayer-name=20lookup=20+=20hoist=20ToStdString?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Two small perf cleanups in the DXF plot path:
+
+1. Introduce m_layerNameLookup (unordered_map<int, wxString>) rebuilt
+   inside SetLayersToExport; GetCurrentLayerName now does one hash
+   lookup instead of scanning m_layersToExport per emitted shape.
+
+   Impact: pcb export dxf calls GetCurrentLayerName per shape via
+   Rect/Circle/Arc/Poly/etc. On a board with N shapes and L exported
+   layers the old code was O(N*L); now O(N).
+
+2. In the per-layer header emit at DXF_plotter.cpp:1002, the lambda
+   used inside std::find_if did `colorName.ToStdString().c_str()` on
+   every comparison — one std::string alloc per candidate color.
+   Extract the wxString→std::string conversion out of the loop.
+
+Both are behaviour-preserving. Same output bytes; just less CPU per
+shape and per layer-header.
+---
+ common/plotters/DXF_plotter.cpp | 16 +++++++---------
+ include/plotters/plotter.h      | 11 ++++++++++-
+ 2 files changed, 17 insertions(+), 10 deletions(-)
+
+diff --git a/common/plotters/DXF_plotter.cpp b/common/plotters/DXF_plotter.cpp
+index 5e114879..b5a2f54a 100644
+--- a/common/plotters/DXF_plotter.cpp
++++ b/common/plotters/DXF_plotter.cpp
+@@ -660,13 +660,9 @@ wxString DXF_PLOTTER::GetCurrentLayerName( DXF_LAYER_OUTPUT_MODE aMode, std::opt
+             return wxString( acad_dxf_color_names[color].name );
+         }
+ 
+-        auto it = std::find_if( m_layersToExport.begin(), m_layersToExport.end(),
+-                                [actualLayerId]( const std::pair<int, wxString>& element )
+-                                {
+-                                    return element.first == actualLayerId;
+-                                } );
+-
+-        return ( it != m_layersToExport.end() ) ? it->second : wxString( "BLACK" );
++        // Perf: O(1) lookup instead of O(N) scan; called per emitted shape.
++        auto it = m_layerNameLookup.find( actualLayerId );
++        return ( it != m_layerNameLookup.end() ) ? it->second : wxString( "BLACK" );
+     }
+ 
+     case DXF_LAYER_OUTPUT_MODE::Layer_Color_Name:
+@@ -1003,10 +999,12 @@ bool DXF_PLOTTER::StartPlot( const wxString& aPageNumber )
+             layerName = GetCurrentLayerName( DXF_LAYER_OUTPUT_MODE::Layer_Name, m_layersToExport.at( i ).first );
+             wxString colorName = GetCurrentLayerName( DXF_LAYER_OUTPUT_MODE::Layer_Color_Name, m_layersToExport.at( i ).first );
+ 
++            // Perf: convert to std::string once, not per comparison.
++            const std::string colorNameStd = colorName.ToStdString();
+             auto it = std::find_if( std::begin( acad_dxf_color_names ), std::end( acad_dxf_color_names ),
+-                                      [colorName](const auto& layer)
++                                      [&colorNameStd](const auto& layer)
+                                       {
+-                                          return std::strcmp( layer.name, colorName.ToStdString().c_str() ) == 0;
++                                          return std::strcmp( layer.name, colorNameStd.c_str() ) == 0;
+                                       });
+ 
+             if( it != std::end( acad_dxf_color_names ) )
+diff --git a/include/plotters/plotter.h b/include/plotters/plotter.h
+index 8766b135..fa28cc6c 100644
+--- a/include/plotters/plotter.h
++++ b/include/plotters/plotter.h
+@@ -21,6 +21,7 @@
+ #ifndef PLOT_COMMON_H_
+ #define PLOT_COMMON_H_
+ 
++#include <unordered_map>
+ #include <vector>
+ #include <eda_fill.h>
+ #include <geometry/eda_angle.h>
+@@ -231,7 +232,14 @@ public:
+      *                        This updates the internal list of layers that will
+      *                        be processed for export.
+      */
+-    void SetLayersToExport( const std::vector<std::pair<PCB_LAYER_ID, wxString>>& aLayersToExport ) { m_layersToExport = aLayersToExport; }
++    void SetLayersToExport( const std::vector<std::pair<PCB_LAYER_ID, wxString>>& aLayersToExport )
++    {
++        m_layersToExport = aLayersToExport;
++        m_layerNameLookup.clear();
++        m_layerNameLookup.reserve( aLayersToExport.size() );
++        for( const auto& entry : aLayersToExport )
++            m_layerNameLookup.emplace( entry.first, entry.second );
++    }
+ 
+     /**
+      * @brief Gets the ID of the current layer.
+@@ -730,6 +738,7 @@ protected:      // variables used in most of plotters:
+ 
+     const PROJECT*   m_project;
+     std::vector<std::pair<PCB_LAYER_ID, wxString>> m_layersToExport;
++    std::unordered_map<int, wxString>              m_layerNameLookup;
+ 
+     PCB_LAYER_ID m_layer;
+ };
+-- 
+2.39.5
+

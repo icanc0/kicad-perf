@@ -1,4 +1,4 @@
-# Series apply-check — all 50 patches land cleanly
+# Series apply-check — all 51 patches land cleanly
 
 Run 2026-08-22 against the fork's base commit `32fcb08d` ("Move about
 dialog names to static const lists.").
@@ -65,9 +65,10 @@ Applying: P47: NETINFO_LIST::RebuildDisplayNetnames — memoise wxSplit of long 
 Applying: P48: SCH_SHEET_LIST::UpdateSymbol/SheetInstanceData — O(N·M) → O(N·log M)
 Applying: P49: SCH_SCREEN::PruneOrphaned{Symbol,Sheet}Instances — precompute lookup map
 Applying: P50: SCH_SCREENS::PruneOrphaned{Symbol,Sheet}Instances — build lookup once per hierarchy
+Applying: P51: SCH_SHEET_LIST::AnnotatePowerSymbols — fix `&&` vs `||` dead-code guard
 ```
 
-All 50 apply. No 3-way merges, no conflicts, no rejects. The series is
+All 51 apply. No 3-way merges, no conflicts, no rejects. The series is
 one continuous line built on top of `master` HEAD at 32fcb08d — a
 reviewer can pick individual patches, subranges, or the whole set.
 

@@ -1,0 +1,79 @@
+From 5560c32e36fb229ac58a0590855047ff61dfc8c2 Mon Sep 17 00:00:00 2001
+From: icanc0 <44480394+icanc0@users.noreply.github.com>
+Date: Sun, 23 Aug 2026 20:07:38 +0000
+Subject: [PATCH 1/2] =?UTF-8?q?P52:=20kicad=5Fcli=20=E2=80=94=20RunKicadCl?=
+ =?UTF-8?q?iDispatch=20correctness=20fixes?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Two independent bugs surfaced when actually building the patched tree
+and running "kicad-cli pcb --help":
+
+1. PGM_BASE::GetMajorMinorVersion() does not exist; the accessor is a
+   free function declared in build_version.h. Introduced (typo) by P10
+   when moving argparse init into RunKicadCliDispatch. Build failed
+   with:
+     kicad_cli.cpp:559:51: error: 'GetMajorMinorVersion' is not a
+     member of 'PGM_BASE'
+
+2. The lazy argparse subtree from P4 only registers ONE top-level
+   subparser (the one named in argv). The dispatch loop at line 657
+   / 697 iterates all commandStack entries and calls
+   argParser.is_subcommand_used(entry.name), which does
+   subparser_map.at(name) — throws map::at for every entry we did NOT
+   register. Guard the check with wantedCommand.
+
+Reproducer before the fix (against 51-patched build):
+  $ kicad-cli pcb --help
+  Error: Unhandled exception class: St12out_of_range  what: map::at
+
+After: prints the pcb usage as expected.
+---
+ kicad/kicad_cli.cpp | 9 ++++++---
+ 1 file changed, 6 insertions(+), 3 deletions(-)
+
+diff --git a/kicad/kicad_cli.cpp b/kicad/kicad_cli.cpp
+index e5bca39c..9e1b0e41 100644
+--- a/kicad/kicad_cli.cpp
++++ b/kicad/kicad_cli.cpp
+@@ -32,6 +32,7 @@
+ #include <settings/kicad_settings.h>
+ #include <systemdirsappend.h>
+ #include <trace_helpers.h>
++#include <build_version.h>
+ 
+ #include <cctype>
+ #include <mutex>
+@@ -556,7 +557,7 @@ bool PGM_KICAD::OnPgmInit()
+ int CLI::RunKicadCliDispatch( int argc, char** argv )
+ {
+     argparse::ArgumentParser argParser( std::string( "kicad-cli" ),
+-                                        PGM_BASE::GetMajorMinorVersion().ToStdString(),
++                                        GetMajorMinorVersion().ToStdString(),
+                                         argparse::default_arguments::none );
+ 
+     argParser.add_argument( "-v", ARG_VERSION )
+@@ -653,7 +654,8 @@ int CLI::RunKicadCliDispatch( int argc, char** argv )
+         COMMAND_ENTRY* cliCmd = nullptr;
+         for( COMMAND_ENTRY& entry : commandStack )
+         {
+-            if( argParser.is_subcommand_used( entry.handler->GetName() ) )
++            if( ( wantedCommand.empty() || entry.handler->GetName() == wantedCommand )
++                && argParser.is_subcommand_used( entry.handler->GetName() ) )
+             {
+                 cliCmd = recurseArgParserSubCommandUsed( argParser, entry );
+             }
+@@ -693,7 +695,8 @@ int CLI::RunKicadCliDispatch( int argc, char** argv )
+     {
+         for( COMMAND_ENTRY& entry : commandStack )
+         {
+-            if( argParser.is_subcommand_used( entry.handler->GetName() ) )
++            if( ( wantedCommand.empty() || entry.handler->GetName() == wantedCommand )
++                && argParser.is_subcommand_used( entry.handler->GetName() ) )
+             {
+                 COMMAND_ENTRY* cmdSubEntry = recurseArgParserSubCommandUsed( argParser, entry );
+                 if( cmdSubEntry != nullptr )
+-- 
+2.39.5
+

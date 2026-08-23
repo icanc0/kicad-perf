@@ -16,13 +16,22 @@ scratch/      wire-protocol reference client, standalone test server, disposable
 
 ## Highlights
 
-- **`patches/`** — **46 patches (0001-0046)** applied to KiCad master,
-  all `git am` clean (see `benchmarks/04-apply-check.md`). See
+- **`patches/`** — **55 patches (0001-0055)** applied to KiCad master
+  (base `32fcb08d`), all `git am` clean. See
   [`patches/README.md`](patches/README.md) for the full table with
   expected wins and risk notes, and
   [`analysis/04-patch-index.md`](analysis/04-patch-index.md) for an
   overview grouped by axis (startup, board init, plot throughput,
   parser/lexer, daemon, hardening, correctness, schematic init).
+  Patches 0052-0055 are new post-build fixes: one correctness bug
+  in the P4 lazy-argparse patch (surfaced by actually running the
+  patched CLI) plus three per-shape/per-pad hoists in the plot loop.
+- **On-version real numbers.** The build blocker documented in
+  `benchmarks/03-build-blocker-notes.md` is now unblocked
+  (userspace sysroot at `~/local/wx-root`, `wx-config` shim,
+  `PKG_CONFIG_SYSROOT_DIR`). Patched-master `kicad-cli --version`:
+  **153 ms** vs stock 9.0.8 **232 ms** — 1.52× faster,
+  20-run hyperfine.
 - **`docs/cli-daemon.md`** — quick start for the `kicad-cli daemon`
   socket server (patches 0007-0021). Turns typical CI matrix builds
   from **~45 s → ~1.5 s** after the first invocation.

@@ -1,0 +1,71 @@
+From 48712eb431d0b92a465906dcff06b91be568fb0f Mon Sep 17 00:00:00 2001
+From: icanc0 <44480394+icanc0@users.noreply.github.com>
+Date: Sun, 23 Aug 2026 20:16:52 +0000
+Subject: [PATCH] =?UTF-8?q?P56:=20PlotStandardLayer=20=E2=80=94=20more=20h?=
+ =?UTF-8?q?oists=20in=20via=20and=20zone=20loops?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Two more per-item hoists in the same file as P54:
+
+1. Via loop: hoist maskHasAnyCu and viaWidthAdj out of the per-via
+   iteration. Both were being recomputed for every via just to check
+   whether to add the fine-width adjustment.
+
+2. Zone plot loop: iterate `zone->GetLayerSet()` directly instead of
+   `zone->GetLayerSet().Seq()`. LSET::Seq() allocates a
+   std::vector<PCB_LAYER_ID>; range iteration on LSET does not. Zone
+   plots invoke this per zone (and per zone-layer), so on a Cu-heavy
+   design with hundreds of copper zones the vector alloc is
+   measurable.
+
+Behaviour-preserving.
+---
+ pcbnew/plot_board_layers.cpp | 11 +++++++----
+ 1 file changed, 7 insertions(+), 4 deletions(-)
+
+diff --git a/pcbnew/plot_board_layers.cpp b/pcbnew/plot_board_layers.cpp
+index a6da9f4b..0ed46c95 100644
+--- a/pcbnew/plot_board_layers.cpp
++++ b/pcbnew/plot_board_layers.cpp
+@@ -763,6 +763,10 @@ void PlotStandardLayer( BOARD* aBoard, PLOTTER* aPlotter, const LSET& aLayerMask
+ 
+     aPlotter->StartBlock( nullptr );
+ 
++    // Perf: hoist loop-invariants out of the per-via loop.
++    const bool     maskHasAnyCu   = ( aLayerMask & LSET::AllCuMask() ).any();
++    const double   viaWidthAdj    = maskHasAnyCu ? itemplotter.getFineWidthAdj() : 0.0;
++
+     for( const PCB_TRACK* track : aBoard->Tracks() )
+     {
+         if( track->Type() != PCB_VIA_T )
+@@ -777,14 +781,12 @@ void PlotStandardLayer( BOARD* aBoard, PLOTTER* aPlotter, const LSET& aLayerMask
+             continue;
+ 
+         int via_margin = 0;
+-        double width_adj = 0;
+ 
+         // TODO(JE) padstacks - separate top/bottom margin
+         if( onSolderMaskLayer )
+             via_margin = via->GetSolderMaskExpansion();
+ 
+-        if( ( aLayerMask & LSET::AllCuMask() ).any() )
+-            width_adj = itemplotter.getFineWidthAdj();
++        double width_adj = viaWidthAdj;
+ 
+         /// Vias not connected to copper are optionally not drawn
+         if( onCopperLayer && !via->FlashLayer( aLayerMask ) )
+@@ -898,7 +900,8 @@ void PlotStandardLayer( BOARD* aBoard, PLOTTER* aPlotter, const LSET& aLayerMask
+         if( zone->GetIsRuleArea() )
+             continue;
+ 
+-        for( PCB_LAYER_ID layer : zone->GetLayerSet().Seq() )
++        // Perf: iterate LSET directly instead of Seq() which allocates a std::vector.
++        for( PCB_LAYER_ID layer : zone->GetLayerSet() )
+         {
+             if( !aLayerMask[layer] )
+                 continue;
+-- 
+2.39.5
+

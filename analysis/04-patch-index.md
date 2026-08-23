@@ -1,4 +1,4 @@
-# Patch series overview — 50 patches, grouped by axis
+# Patch series overview — 55 patches, grouped by axis
 
 Each row links to a patch under `patches/` and states one primary
 axis and one secondary axis when it applies. Numbers are the
@@ -118,6 +118,8 @@ Follow-ups to F, all found by branch-sweep passes.
 |--:|----------------------------------------------|-------------|------------------------------------------------|
 | 34 | 0034-drc-engine-fix-courtyard-init-typo     | correctness | copy-paste bug; harmless today, footgun tomorrow |
 | 35 | 0035-drc-engine-bulk-move-rules             | micro       | reserve + move-append instead of copy push_back  |
+| 51 | 0051-annotate-power-symbols-fix-and-vs-or   | correctness | `&&` vs `||` dead-code guard in AnnotatePowerSymbols |
+| 52 | 0052-cli-dispatch-fixes                     | correctness | fixes in RunKicadCliDispatch surfaced by building on master |
 
 ## I. Schematic-load algorithmic wins (patches 47-50)
 
@@ -136,6 +138,23 @@ drop the per-item lookup to O(log M).
 Combined: schematic load's orphan-prune + instance-update phase on a
 hierarchical design (100 screens, 1000 sheets, 50 symbols/screen)
 goes from **~5-10 million** per-item comparisons to **~50 thousand**.
+
+## J. PCB plot-loop hoists (patches 53-55)
+
+Per-shape / per-pad / per-footprint hoists in the pcb export path,
+found by walking `PlotStandardLayer` and `BRDITEMS_PLOTTER` methods
+looking for loop-invariant recomputation.
+
+| # | patch                                                    | rôle                                                          |
+|--:|----------------------------------------------------------|---------------------------------------------------------------|
+| 53 | 0053-dxf-plotter-lookup-map                             | O(1) layer-name map in DXF_PLOTTER; hoist ToStdString         |
+| 54 | 0054-plot-standard-layer-hoist-loop-invariants           | per-pad LSET::Seq()/count()/color-lookup hoisted; pad/mask intersect computed once |
+| 55 | 0055-brditems-plotter-cache-variant                     | cache `m_board->GetCurrentVariant()` in BRDITEMS_PLOTTER ctor |
+
+Combined per-plot on a 5000-pad / 5000-footprint board:
+- ~5000 `std::vector<PCB_LAYER_ID>` allocations eliminated
+- ~20000 color-settings map lookups eliminated
+- ~15000 `wxString` copies eliminated
 
 ## Cross-references
 
