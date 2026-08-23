@@ -1,0 +1,15 @@
+{
+  "scenario": "cli.svg_export",
+  "binary": "/home/vincent/not-my-projects/kicad/build-mini/kicad/kicad-cli",
+  "board": "/home/vincent/not-my-projects/kicad-references/kicanvas/debug/examples/starfish.kicad_pcb",
+  "board_size_bytes": 4728434,
+  "wall_median_ms": 1013.27,
+  "wall_stddev_ms": 64.35,
+  "out_svg_bytes": 939976,
+  "exit": 0,
+  "wall_ms": 1030,
+  "user_ms": 791,
+  "sys_ms": 202,
+  "max_rss_kb": 239944,
+  "rss_csv": "/home/vincent/not-my-projects/kicad-perf/harness/reports/2026-08-23-2145/raw/patched-master__cli.svg_export__2/rss.csv"
+}

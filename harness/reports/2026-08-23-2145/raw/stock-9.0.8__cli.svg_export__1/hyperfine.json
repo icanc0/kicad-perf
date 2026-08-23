@@ -1,0 +1,35 @@
+{
+  "results": [
+    {
+      "command": "/home/vincent/local/bin/kicad-cli pcb export svg --layers F.Cu --output /home/vincent/not-my-projects/kicad-perf/harness/reports/2026-08-23-2145/raw/stock-9.0.8__cli.svg_export__1/out.svg /home/vincent/not-my-projects/kicad-references/kicanvas/debug/examples/starfish.kicad_pcb",
+      "mean": 1.3323809118,
+      "stddev": 0.018655996683346526,
+      "median": 1.3297404636,
+      "user": 1.4212201,
+      "system": 0.23253114,
+      "min": 1.3154524006,
+      "max": 1.3638108476,
+      "times": [
+        1.3297404636,
+        1.3309479866,
+        1.3219528606,
+        1.3638108476,
+        1.3154524006
+      ],
+      "memory_usage_byte": [
+        251408384,
+        251408384,
+        251408384,
+        251408384,
+        251408384
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

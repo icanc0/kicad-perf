@@ -1,0 +1,13 @@
+{
+  "scenario": "cli.version",
+  "binary": "/home/vincent/local/bin/kicad-cli",
+  "wall_median_ms": 227.43,
+  "wall_stddev_ms": 7.62,
+  "hyperfine_json": "/home/vincent/not-my-projects/kicad-perf/harness/reports/2026-08-23-2145/raw/stock-9.0.8__cli.version__0/hyperfine.json",
+  "exit": 0,
+  "wall_ms": 342,
+  "user_ms": 253,
+  "sys_ms": 66,
+  "max_rss_kb": 57000,
+  "rss_csv": "/home/vincent/not-my-projects/kicad-perf/harness/reports/2026-08-23-2145/raw/stock-9.0.8__cli.version__0/rss.csv"
+}
