@@ -1,0 +1,60 @@
+From fb90cd6ca07ffd0ece0e45414f600a17ddba3def Mon Sep 17 00:00:00 2001
+From: icanc0 <44480394+icanc0@users.noreply.github.com>
+Date: Sun, 23 Aug 2026 21:07:59 +0000
+Subject: [PATCH] =?UTF-8?q?P58:=20FONT::GetFont=20=E2=80=94=20single=20loo?=
+ =?UTF-8?q?kup=20on=20the=20cache-hit=20path?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Old:
+  if( s_fontMap.find( key ) != s_fontMap.end() )
+      font = s_fontMap[key];
+  ... later s_fontMap[key] = font;
+
+Two lookups on every cache hit (find + operator[]), one on every
+cache miss (operator[]).
+
+New:
+  auto it = s_fontMap.find( key );
+  if( it != s_fontMap.end() )
+      return it->second;
+  ...
+  s_fontMap[key] = font;
+
+One lookup on hit, two on miss (find + [ ]). Cache-hit is the
+overwhelmingly common case; GetFont is on the per-text-item plot
+path.
+---
+ common/font/font.cpp | 15 ++++++++-------
+ 1 file changed, 8 insertions(+), 7 deletions(-)
+
+diff --git a/common/font/font.cpp b/common/font/font.cpp
+index b5a5ffde..f280853f 100644
+--- a/common/font/font.cpp
++++ b/common/font/font.cpp
+@@ -148,13 +148,14 @@ FONT* FONT::GetFont( const wxString& aFontName, bool aBold, bool aItalic,
+ 
+     std::tuple<wxString, bool, bool, bool> key = { aFontName, aBold, aItalic, aForDrawingSheet };
+ 
+-    FONT* font = nullptr;
+-
+-    if( s_fontMap.find( key ) != s_fontMap.end() )
+-        font = s_fontMap[key];
+-
+-    if( !font )
+-        font = OUTLINE_FONT::LoadFont( aFontName, aBold, aItalic, aEmbeddedFiles, aForDrawingSheet );
++    // Perf: single map lookup instead of find + operator[] (which does a
++    // second lookup on the hit path). GetFont is hot — called per plotted
++    // text item.
++    auto it = s_fontMap.find( key );
++    if( it != s_fontMap.end() )
++        return it->second;
++
++    FONT* font = OUTLINE_FONT::LoadFont( aFontName, aBold, aItalic, aEmbeddedFiles, aForDrawingSheet );
+ 
+     if( !font )
+         font = getDefaultFont();
+-- 
+2.39.5
+
