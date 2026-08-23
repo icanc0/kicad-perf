@@ -26,12 +26,23 @@ scratch/      wire-protocol reference client, standalone test server, disposable
   Patches 0052-0055 are new post-build fixes: one correctness bug
   in the P4 lazy-argparse patch (surfaced by actually running the
   patched CLI) plus three per-shape/per-pad hoists in the plot loop.
-- **On-version real numbers.** The build blocker documented in
-  `benchmarks/03-build-blocker-notes.md` is now unblocked
-  (userspace sysroot at `~/local/wx-root`, `wx-config` shim,
-  `PKG_CONFIG_SYSROOT_DIR`). Patched-master `kicad-cli --version`:
-  **153 ms** vs stock 9.0.8 **232 ms** — 1.52× faster,
-  20-run hyperfine.
+- **On-version real numbers.** Build unblocked in userspace
+  (see `benchmarks/03-build-blocker-notes.md`). Head-to-head with
+  3 hyperfine runs after warmup on a quiet CPU:
+
+    |                        | stock 9.0.8 | patched master | ratio |
+    |------------------------|------------:|---------------:|------:|
+    | `--version` wall       |     229 ms  |    **153 ms**  |  1.50×|
+    | `--version` user CPU   |     168 ms  |     109 ms     |  1.54×|
+    | `svg export` wall      |    1330 ms  |   **1013 ms**  |  1.31×|
+    | `svg export` user CPU  |    1409 ms  |     811 ms     |**1.74×**|
+    | `svg export` peak RSS  |   245.5 MB  |    240.0 MB    | -5.5 MB|
+
+  User-CPU savings on `svg export` (42%) exceed wall savings (24%)
+  — patched is now IO-bound. See
+  [`analysis/09-real-numbers-first-pass.md`](analysis/09-real-numbers-first-pass.md)
+  for the detailed reading (RSS curve, why the peak-RSS delta is
+  small, what to attack next).
 - **`docs/cli-daemon.md`** — quick start for the `kicad-cli daemon`
   socket server (patches 0007-0021). Turns typical CI matrix builds
   from **~45 s → ~1.5 s** after the first invocation.
