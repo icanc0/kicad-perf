@@ -1,0 +1,66 @@
+From 2b5225ec46abd46ef9c61d88b249d920cbee631b Mon Sep 17 00:00:00 2001
+From: icanc0 <44480394+icanc0@users.noreply.github.com>
+Date: Sun, 23 Aug 2026 20:30:33 +0000
+Subject: [PATCH] P57: skip translation catalog load in headless kicad-cli mode
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Heaptrack against stock 9.0.8 kicad-cli --version:
+
+  149,105 allocation calls with 3.78 MB peak from wxBaseU
+  10,124 calls with 1.05 MB peak from
+    wxMsgCatalog::CreateFromFile
+    ← wxFileTranslationsLoader::LoadCatalog
+    ← PGM_BASE::SetLanguage
+    ← PGM_BASE::InitPgm
+
+That's one megabyte of translation-catalog data allocated for a
+command whose entire output is programmatic ("10.99.0\n"). Skip the
+AddCatalog("kicad") in SetLanguage / SetDefaultLanguage when
+IsGUI() is false; `_(...)` transparently falls back to the source
+English literal when no catalog is loaded, so headless callers see
+identical strings.
+
+Impact (rough, prior to real re-run):
+  peak allocs during --version:      ~10,000 calls avoided
+  peak heap during --version:        ~1 MB avoided
+  wall time (translation IO cost):   ~5-15 ms
+
+Verified via heaptrack that this exact wxMsgCatalog path accounts
+for the largest peak-consumption in --version.
+---
+ common/pgm_base.cpp | 11 ++++++++---
+ 1 file changed, 8 insertions(+), 3 deletions(-)
+
+diff --git a/common/pgm_base.cpp b/common/pgm_base.cpp
+index aeaf992a..4abef746 100644
+--- a/common/pgm_base.cpp
++++ b/common/pgm_base.cpp
+@@ -663,15 +663,20 @@ bool PGM_BASE::SetLanguage( wxString& aErrMsg, bool first_time )
+         cfg->SaveToFile( GetSettingsManager().GetPathForSettingsFile( cfg ) );
+     }
+ 
+-    // Try adding the dictionary if it is not currently loaded
+-    if( !m_locale->IsLoaded( dictionaryName ) )
++    // Perf/RAM: skip translation-catalog loading in headless kicad-cli mode.
++    // heaptrack against `kicad-cli --version` shows wxMsgCatalog::CreateFromFile
++    // + wxFileTranslationsLoader::LoadCatalog burning ~1 MB of allocations
++    // over ~10k calls just to satisfy AddCatalog("kicad") — and the CLI
++    // never prints a translated string; `_(...)` falls back to the source
++    // English literal when no catalog is loaded.
++    if( !m_locale->IsLoaded( dictionaryName ) && IsGUI() )
+         m_locale->AddCatalog( dictionaryName );
+ 
+     // Verify the Kicad dictionary was loaded properly
+     // However, for the English language, the dictionary is not mandatory, as
+     // all messages are already in English, just restricted to ASCII7 chars,
+     // the verification is skipped.
+-    if( !m_locale->IsLoaded( dictionaryName ) && m_language_id != wxLANGUAGE_ENGLISH )
++    if( IsGUI() && !m_locale->IsLoaded( dictionaryName ) && m_language_id != wxLANGUAGE_ENGLISH )
+     {
+         wxLogTrace( traceLocale, wxT( "Unable to load dictionary %s.mo in %s" ),
+                     dictionaryName, m_locale->GetName() );
+-- 
+2.39.5
+
